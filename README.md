@@ -1,6 +1,6 @@
 # TODO
 ## Additions
-- add string cleaning functions
+- ~~add string cleaning functions~~
 - add proper training / validation set splitter
 - add tokenizer
 - add better tqdm
