@@ -53,6 +53,33 @@ class _LazyHeap():
 	def push(self, item):
 		heapq.heappush(self.heap, item)
 
+class _LazyHeap2():
+	def __init__(self,
+		is_valid: Callable,
+		update: Callable,
+		heap = None,
+	):
+		self.heap = heap if heap else []
+		heapq.heapify(self.heap)
+		self.is_valid = is_valid
+		self.update = update
+	
+	def __bool__(self):
+		return len(self.heap) > 0
+
+	def __len__(self):
+		return len(self.heap)
+
+	def pop(self):
+		item = heapq.heappop(self.heap)
+		while not self.is_valid(*item):
+			new_item = self.update(*item)
+			item = heapq.heappushpop(self.heap, new_item)
+		return item
+		
+	def push(self, item):
+		heapq.heappush(self.heap, item)
+
 class _TokenList:
 	def __init__(self, text: np.ndarray):
 		N = len(text)
@@ -64,13 +91,12 @@ class _TokenList:
 		self.pairs = defaultdict(set)
 		self.counts = defaultdict(int)
 		for i in range(N - 1):
-			pair = (text[i], text[i+1])
-			self.pairs[pair].add(i)
+			pair = (int(text[i]), int(text[i+1]))
+			self.pairs[pair].add(int(i))
 			self.counts[pair] += 1
 	
 	def get_key_list(self):
-		print([(-count, pair) for pair, count in self.counts])
-		return [(-count, pair) for pair, count in self.counts]
+		return [(-count, pair) for pair, count in self.counts.items()]
 	
 	def get_count(self, pair):
 		return self.counts[pair]
@@ -85,6 +111,7 @@ class _TokenList:
 		old_pair = (t1, t2)
 		pairs = self.pairs.pop(old_pair)
 		self.counts.pop(old_pair)
+		modified_pairs = set()
 		for i in pairs:
 			if self.tokens[i] != t1:
 				continue
@@ -97,19 +124,24 @@ class _TokenList:
 			self._nullify_index(j)
 			if k != self.N:
 				self.prev[k] = i
-			print(f"{i}, {j}")
 			if self.prev[i] != -1:
 				p = self.prev[i]
 				pair = (self.tokens[p], t1)
 				new_pair = (self.tokens[p], t_new)
-				self.update_count(p, p, pair, new_pair)
+				modified = self.update_count(p, p, pair, new_pair)
+				if modified:
+					modified_pairs.add(modified)
 			if k != self.N:
 				pair = (t2, self.tokens[k])
 				new_pair = (t_new, self.tokens[k])
-				self.update_count(j, i, pair, new_pair)
+				modified = self.update_count(j, i, pair, new_pair)
+				if modified:
+					modified_pairs.add(modified)
+		return modified_pairs
 	
 	def update_count(self, old_i, new_i, old_pair, new_pair):
-		print(f"updating {old_i}: {old_pair} -> {new_i}: {new_pair}")
+		old_pair = (int(old_pair[0]), int(old_pair[1]))
+		new_pair = (int(new_pair[0]), int(new_pair[1]))
 		if old_pair in self.counts:
 			self.counts[old_pair] -= 1
 			self.pairs[old_pair].remove(old_i)
@@ -118,7 +150,9 @@ class _TokenList:
 				self.pairs.pop(old_pair)
 			
 		self.counts[new_pair] += 1
-		self.pairs[new_pair].add(new_i)
+		self.pairs[new_pair].add(int(new_i))
+		if self.counts[new_pair] == 1:
+			return new_pair
 
 def create_td(token_set: list) -> TokenDictionary:
 	idx_to_token = {i: t for i, t in enumerate(token_set)}
@@ -130,23 +164,24 @@ def create_tokenizer(data: str, num_tokens: int):
 	text = np.array([token_to_id[token] for token in data], dtype=np.int16)
 
 	tokens = _TokenList(text)
-
-	heap = _LazyHeap(
-		refresh = lambda: tokens.get_key_list(),
+	heap = _LazyHeap2(
 		is_valid = lambda neg_c, pair: tokens.get_count(pair) == -neg_c,
+		update = lambda _, pair: (-tokens.get_count(pair), pair),
 		heap = tokens.get_key_list()
 	)
 
 	token_count = len(token_set)
 	while token_count < num_tokens and heap:
 		_, (t1, t2) = heap.pop()
-		new_token = token_count + 1
-		token_set.append(new_token)
+		new_token = token_count
 		new_token_str = id_to_token[t1] + id_to_token[t2]
+		token_set.append(new_token_str)
 		id_to_token[new_token] = new_token_str
 		token_to_id[new_token_str] = new_token
 		# replace (a, b)
-		tokens.merge(t1, t2, new_token)
+		modified = tokens.merge(t1, t2, new_token)
+		for pair in modified:
+			heap.push((-tokens.get_count(pair), pair))
 		token_count += 1
 	return TokenDictionary(token_set, id_to_token, token_to_id)
 
