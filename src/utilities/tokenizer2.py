@@ -56,30 +56,69 @@ class _LazyHeap():
 class _TokenList:
 	def __init__(self, text: np.ndarray):
 		N = len(text)
+		self.N = N
 		self.tokens = np.copy(text)
 		self.prev = np.arange(-1, N - 1)
 		self.next = np.arange(1, N + 1)
 
-		self.pairs = defaultdict(list)
+		self.pairs = defaultdict(set)
 		self.counts = defaultdict(int)
-		for id in range(N - 1):
-			pair = (text[id], text[id+1])
-			self.pairs[pair].append(id)
+		for i in range(N - 1):
+			pair = (text[i], text[i+1])
+			self.pairs[pair].add(i)
 			self.counts[pair] += 1
 	
-	def get_heap(self):
+	def get_key_list(self):
 		return [(-count, pair) for pair, count in self.counts]
 	
 	def get_count(self, pair):
 		return self.counts[pair]
 	
-	def merge(t1, t2, t_new):
-		# iterate through all indices with (t1, t2)
-		# for all i (signifies where t1 is):
-		#   j <- next[i]
-		#   token[i] <- t_new
-		#   next[i] <- next[next[i]]
-		pass
+	def _nullify_index(self, i):
+		self.tokens[i] = -1
+		self.next[i] = self.N
+		self.prev[i] = -1
+	
+	# merge two tokens together and update counts + positions
+	def merge(self, t1, t2, t_new):
+		old_pair = (t1, t2)
+		pairs = self.pairs.pop(old_pair)
+		self.counts.pop(old_pair)
+		for i in pairs:
+			if self.tokens[i] != t1:
+				continue
+			j = self.next[i]
+			if j == self.N or self.tokens[j] != t2:
+				continue
+			k = self.next[j]
+			self.tokens[i] = t_new
+			self.next[i] = k
+			self._nullify_index(j)
+			if k != self.N:
+				self.prev[k] = i
+			print(f"{i}, {j}")
+			if self.prev[i] != -1:
+				p = self.prev[i]
+				pair = (self.tokens[p], t1)
+				new_pair = (self.tokens[p], t_new)
+				self.update_count(p, p, pair, new_pair)
+			if k != self.N:
+				pair = (t2, self.tokens[k])
+				new_pair = (t_new, self.tokens[k])
+				self.update_count(j, i, pair, new_pair)
+	
+	def update_count(self, old_i, new_i, old_pair, new_pair):
+		print(f"updating {old_i}: {old_pair} -> {new_i}: {new_pair}")
+		if old_pair in self.counts:
+			self.counts[old_pair] -= 1
+			self.pairs[old_pair].remove(old_i)
+			# ideally, remove from position dict
+			if self.counts[old_pair] <= 0:
+				self.counts.pop(old_pair)
+				self.pairs.pop(old_pair)
+			
+		self.counts[new_pair] += 1
+		self.pairs[new_pair].add(new_i)
 
 def create_td(token_set: list) -> TokenDictionary:
 	idx_to_token = {i: t for i, t in enumerate(token_set)}
