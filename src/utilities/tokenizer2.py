@@ -57,7 +57,7 @@ class _TokenList:
 	def __init__(self, text: np.ndarray):
 		N = len(text)
 		self.N = N
-		self.tokens = np.copy(text)
+		self.tokens = np.copy(text).astype(np.int16, copy=False)
 		self.prev = np.arange(-1, N - 1)
 		self.next = np.arange(1, N + 1)
 
@@ -69,6 +69,7 @@ class _TokenList:
 			self.counts[pair] += 1
 	
 	def get_key_list(self):
+		print([(-count, pair) for pair, count in self.counts])
 		return [(-count, pair) for pair, count in self.counts]
 	
 	def get_count(self, pair):
@@ -112,7 +113,6 @@ class _TokenList:
 		if old_pair in self.counts:
 			self.counts[old_pair] -= 1
 			self.pairs[old_pair].remove(old_i)
-			# ideally, remove from position dict
 			if self.counts[old_pair] <= 0:
 				self.counts.pop(old_pair)
 				self.pairs.pop(old_pair)
@@ -129,36 +129,26 @@ def create_tokenizer(data: str, num_tokens: int):
 	token_set, id_to_token, token_to_id = create_td(sorted(set(data)))
 	text = np.array([token_to_id[token] for token in data], dtype=np.int16)
 
-	pairs = np.stack([text[:-1], text[1:]], axis=1)
-	unique_pairs, counts = np.unique(pairs, axis=0, return_counts=True)
-	pair_counts = dict(zip(map(tuple, unique_pairs), counts))
-
-	pair_positions = defaultdict(set)
-	for i in range(len(text) - 1):
-		pair_positions[(text[i], text[i+1])].add(i)
+	tokens = _TokenList(text)
 
 	heap = _LazyHeap(
-		refresh = lambda: [(-c, pair) for pair, c in pair_counts.items() if c > 0],
-		is_valid = lambda neg_c, pair: pair_counts[pair] == -neg_c,
-		heap = [(-c, p) for p, c in pair_counts.items()]
+		refresh = lambda: tokens.get_key_list(),
+		is_valid = lambda neg_c, pair: tokens.get_count(pair) == -neg_c,
+		heap = tokens.get_key_list()
 	)
 
 	token_count = len(token_set)
 	while token_count < num_tokens and heap:
 		_, (t1, t2) = heap.pop()
 		new_token = token_count + 1
-		id_to_token[new_token] = id_to_token[t1] + id_to_token[t2]
+		token_set.append(new_token)
+		new_token_str = id_to_token[t1] + id_to_token[t2]
+		id_to_token[new_token] = new_token_str
+		token_to_id[new_token_str] = new_token
 		# replace (a, b)
-		
-		# update text
-
-		# update pair_counts
-
+		tokens.merge(t1, t2, new_token)
 		token_count += 1
-
-	return None
-
-
+	return TokenDictionary(token_set, id_to_token, token_to_id)
 
 if __name__ == '__main__':
 	data = "banana"
