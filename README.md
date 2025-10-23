@@ -2,9 +2,8 @@
 ## Additions
 - ~~add string cleaning functions~~
 - add proper training / validation set splitter
-- add tokenizer
-- add better tqdm
-- add graphing, including loss space (fun)
+- ~~add tokenizer~~: still debug this, also only use training data + proper <UNK> handling
+- add ~~graphing~~, including loss space (fun): IMPROVE
 
 ## Improvements
 - improve device handling (both in batcher / )

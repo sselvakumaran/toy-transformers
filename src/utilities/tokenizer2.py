@@ -163,60 +163,63 @@ def create_tokenizer(data: str, num_tokens: int, pattern: Optional[str] = None):
 	return TokenDictionary(token_set, id_to_token, token_to_id)
 
 class _TrieNode:
-  def __init__(self):
-    self.children: Dict[str, _TrieNode] = {}
-    self.is_token = False
+	def __init__(self):
+		self.children: Dict[str, _TrieNode] = {}
+		self.is_token = False
 
 class _Trie:
-  def __init__(self):
-    self.root = _TrieNode()
-  
-  def insert(self, token: str):
-    node = self.root
-    for c in token:
-      if c not in node.children:
-        node.children[c] = _TrieNode()
-      node = node.children[c]
-    node.is_token = True
-  
-  def create_from_set(tokens: list):
-    out = _Trie()
-    for token in tokens:
-      out.insert(token)
-    return out
-  
-  def strtok(self, text, i) -> str:
-    node = self.root
-    s = ""
-    longest_s = None
-    for i in range(i, len(text)):
-      c = text[i]
-      if c in node.children:
-        node = node.children[c]
-        s += c
-        if node.is_token:
-          longest_s = s
-      else:
-        break
-    return longest_s, i + len(longest_s)
-  
-  def tokenize(self, s: str):
-    tokens = []
-    i = 0
-    while i < len(s):
-      tok, j = self.strtok(s, i)
-      tokens.append(tok)
-      i = j
-    return tokens
+	def __init__(self):
+		self.root = _TrieNode()
+	
+	def insert(self, token: str):
+		node = self.root
+		for c in token:
+			if c not in node.children:
+				node.children[c] = _TrieNode()
+			node = node.children[c]
+		node.is_token = True
+	
+	@staticmethod
+	def create_from_set(tokens: list):
+		out = _Trie()
+		for token in tokens:
+			out.insert(token)
+		return out
+	
+	def strtok(self, text, start) -> str:
+		node = self.root
+		s = ""
+		longest_s = None
+		for i in range(start, len(text)):
+			c = text[i]
+			if c in node.children:
+				node = node.children[c]
+				s += c
+				if node.is_token:
+					longest_s = s
+			else:
+				break
+		if longest_s is None:
+			return "<UNK>", i + 1
+		return longest_s, start + len(longest_s)
+	
+	def tokenize(self, s: str):
+		tokens = []
+		i = 0
+		while i < len(s):
+			tok, j = self.strtok(s, i)
+			tokens.append(tok)
+			i = j
+		return tokens
 
 def reduce_token_dictionary(td: TokenDictionary, text: str) -> TokenDictionary:
-  trie: _Trie = _Trie.create_from_set(td.token_set)
-  new_token_set = sorted(set(trie.tokenize(text)))
-  return _create_td(new_token_set)
+	trie: _Trie = _Trie.create_from_set(td.token_set)
+	new_token_set = sorted(set(trie.tokenize(text)))
+	return _create_td(new_token_set)
 
 def get_encoder(td: TokenDictionary) -> Callable:
-  trie: _Trie = _Trie.create_from_set(td.token_set)
-  return lambda s: list(map(td.token_to_idx.__getitem__, trie.tokenize(s)))
+	trie: _Trie = _Trie.create_from_set(td.token_set)
+	return lambda s: list(map(td.token_to_idx.__getitem__, trie.tokenize(s)))
 
 def get_decoder(td: TokenDictionary) -> Callable:
-  return lambda s: list(map(td.idx_to_token.__getitem__, s))
+	return lambda b: list(map(td.idx_to_token.__getitem__, b))
