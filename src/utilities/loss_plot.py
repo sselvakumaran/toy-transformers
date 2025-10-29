@@ -15,24 +15,40 @@ class _PointHandler:
 	
 	def __bool__(self):
 		return len(self.xs) > 0 and len(self.ys) > 0
+	
+	def __len__(self):
+		return len(self.xs)
 
 	def add_point(self, x: Optional[int] = None, y: Optional[int] = None) -> None:
 		if y is None:
 			return # convenient to put in optional arguments without case
-		x = x if x is not None else self.get_last_point() + 1
+		x = x if x is not None else self.get_last_x() + 1
 		self.xs.append(x)
 		self.ys.append(y)
 	
 	def add_points(self, xs: List[int], ys: List[int]) -> None:
 		if len(xs) != len(ys):
 			raise ValueError("lists are not of equal length")
-		self.xs.extend(xs)
-		self.ys.extend(ys)
+
+		xs_filtered, ys_filtered = zip(
+			*filter(
+				lambda t: t[1] is not None, 
+				zip(xs, ys)
+		))
+		
+		self.xs.extend(xs_filtered)
+		self.ys.extend(ys_filtered)
 	
 	def get_last_point(self) -> Tuple[int, int]:
 		if not self:
-			return None
+			return 0
 		return (self.xs[-1], self.ys[-1])
+	
+	def get_points(self):
+		return (self.xs, self.ys)
+	
+	def get_last_x(self):
+		return self.xs[-1] if self else 0
 	
 	def get_last_points(self, 
 		n: int = 50, 
@@ -46,12 +62,10 @@ class _PointHandler:
 			start_idx = n + (1 if include_previous else 0)
 			return(self.xs[-start_idx:], self.ys[-start_idx:])
 		
-		# by == 'x'
-		start_val = self.get_last_point()[0] - (n - 1)
-		start_idx = bisect.bisect_left(self.xs, start_val)
+		start_val = self.get_last_x() - (n - 1)
+		start_idx = bisect.bisect_left(self.xs, start_val) - (1 if include_previous else 0)
 
 		return (self.xs[start_idx:], self.ys[start_idx:])
-
 
 # TODO: fix
 class LossTracker:
@@ -62,56 +76,72 @@ class LossTracker:
 		sns.set_style("ticks")
 		sns.set_context("notebook", font_scale=1, rc={"lines.linewidth": 2})
 		sns.set_palette(palette)
-		self.fig = plt.figure()
+		self.fig = plt.figure(figsize=(8, 5))
 
-		self.x = []
-		self.train = []
-		self.val = []
-		self.last_train_x = 0
-		self.last_val_x = 0
-	
-	# Add singular value to data tracker, assumes called in non-decreasing order
+		self.train_points = _PointHandler()
+		self.val_points = _PointHandler()
+
 	def add_points(self, 
 		train: float, 
 		val: Optional[float] = None, 
 		x: Optional[int] = None
 	):
-		current_x = x or (self.last_train_x + 1)
+		x = x if x is not None else self.train_points.get_last_x() + 1
+		self.train_points.add_point(x=x, y=train)
+		self.val_points.add_point(x=x, y=val)
 
-		self.x.append(current_x)
-		self.train.append(train)
-		self.last_train_x = max(self.last_train_x, current_x)
-
-		self.val.append(val)
-		if val is not None:
-			self.last_val_x = max(self.last_val_x, current_x)
-
-	# Add batch of values to data tracker 
 	def add_points_batch(self, 
 		trains: List[float], 
 		vals: List[Optional[float]] = None,
+		start_x : Optional[int] = None
 	):
-		for train, val in zip_longest(trains, vals):
-			self.add_points(train, val)
+		start_x = start_x if start_x is not None else self.train_points.get_last_x() + 1
+		xs = list(range(start_x, start_x + len(trains)))
+		self.train_points.add_points(xs, trains)
+		self.val_points.add_points(xs, vals)
 
 	def render_fast_figure(self) -> plt.Figure:
 		self.fig.clear()
 
-		ax1 = self.fig.add_subplot(1, 2, 1)
-		sns.lineplot(x=self.x, y=self.train, ax=ax1, alpha=0.6)
-		sns.lineplot(x=self.x, y=self.val,   ax=ax1)
+		gs = self.fig.add_gridspec(1, 2, width_ratios=[3,1], wspace=0.1)
+		ax1 = self.fig.add_subplot(gs[0, 0])
+		ax2 = self.fig.add_subplot(gs[0, 1], sharey=ax1)
 
-		if self.train:
-			ax1.scatter(self.last_train_x, self.train[-1], s=40, zorder=3)
-		if self.val:
-			ax1.scatter(self.last_val_x, self.val[self.last_val_x - 1], s=40, zorder=3)
+		trains = self.train_points.get_points()
+		vals = self.val_points.get_points()
+
+		# plot 1
+		sns.lineplot(x=trains[0], y=trains[1], ax=ax1, alpha=0.6, label="train")
+		sns.lineplot(x=vals[0], y=vals[1], ax=ax1, label="val")
 		
-		ax2 = self.fig.add_subplot(1, 2, 2)
-		ax2_x = self.x[-50:]
-		sns.lineplot(x=ax2_x, y=self.train[-50:], ax=ax2, alpha=0.6)
-		sns.lineplot(x=ax2_x, y=self.val[-50:],   ax=ax2)
 
-		sns.despine(fig=self.fig)
+		if self.train_points:
+			last_train_point = self.train_points.get_last_point()
+			ax1.scatter([last_train_point[0]], [last_train_point[1]], s=40, zorder=3)
+		if self.val_points:
+			last_val_point = self.val_points.get_last_point()
+			ax1.scatter([last_val_point[0]], [last_val_point[1]], s=40, zorder=3)
+		
+		# plot 2
+		recent_train_points = self.train_points.get_last_points()
+		recent_val_points = self.val_points.get_last_points(by='x')
+		sns.lineplot(x=recent_train_points[0], y=recent_train_points[1], ax=ax2, alpha=0.6)
+		sns.lineplot(x=recent_val_points[0], y=recent_val_points[1], ax=ax2)
+
+		ax2.get_yaxis().set_visible(False)
+
+		if len(self.train_points) > 50:
+			print(f"{len(self.train_points) - 49} {recent_val_points[0]}")
+			ax2.set_xlim(left=recent_train_points[0][1])
+
+		handles, labels = ax1.get_legend_handles_labels()
+		if handles:
+			if ax1.get_legend() is not None:
+				ax1.get_legend().remove()
+			self.fig.legend(handles, labels, loc='upper right', bbox_to_anchor=(0.9, 0.9))
+
+		sns.despine(ax=ax1, offset=0.2)
+		sns.despine(ax=ax2, left = True, offset=0.2)
 
 		return self.fig
 
