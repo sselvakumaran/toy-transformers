@@ -91,8 +91,8 @@ class Block(nn.Module):
 		self.ln2 = nn.LayerNorm(n_embed)
 
 	def forward(self, x):
-		x = x + self.sa(self.ln1(x))
-		x = x + self.ffwd(self.ln2(x))
+		x = torch.add(x, self.sa(self.ln1(x)))
+		x = torch.add(x, self.ffwd(self.ln2(x)))
 		return x
 
 
@@ -132,18 +132,14 @@ class LanguageModel(nn.Module):
 	def generate(self, idx, max_new_tokens):
 		for _ in range(max_new_tokens):
 			idx_cond = idx[:, -self.config.block_size:]
-			logits, _ = self(idx_cond)
-			logits = logits[:, -1, :]
-			probs = F.softmax(logits, dim = -1)
-			idx_next = torch.multinomial(probs, num_samples = 1)
-			idx = torch.cat((idx, idx_next), dim=1)
-		return idx
-	
-	@torch.no_grad()
-	def generate_stream(self, idx, max_new_tokens):
-		for _ in range(max_new_tokens):
-			idx_cond = idx[:, -self.config.block_size:]
-			logits, _ = self(idx_cond)
+
+			_, T = idx_cond.shape
+			device = self.config.device
+			tok_embed = self.token_embedding_table(idx_cond)
+			pos_embed = self.position_embedding_table(torch.arange(T, device=device))
+			x = self.blocks(tok_embed + pos_embed)
+			logits = self.lm_head(x)
+
 			logits = logits[:, -1, :]
 			probs = F.softmax(logits, dim = -1)
 			idx_next = torch.multinomial(probs, num_samples = 1)
