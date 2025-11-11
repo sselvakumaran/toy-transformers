@@ -4,12 +4,39 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import bisect
 from itertools import zip_longest
+import math
 from typing import Optional, List, Literal, Tuple
+from dataclasses import dataclass
+
+class _Binner:
+	@dataclass
+	class Bin:
+		count: int = 0
+		sum: int = 0
+		sum2: int = 0
+		min: int
+		max: int
+		start_x: int
+		end_x: int
+		start_idx: int
+		end_idx: int 
+
+	def __init__(self, estimated_samples: int, max_bins = 50):
+		self.bins = []
+
+	@staticmethod
+	def _calc_best_bin_size(x):
+		_b = lambda x: math.sqrt(2*x + 0.25) - 0.5
+		_A = lambda x, R: math.floor(_b(x) / R) + 1
+	
 
 # store 2d points easier
 # assumes inputted in non-decreasing order
 class _PointHandler:
-	def __init__(self):
+	def __init__(self,
+		estimated_num_samples: int = 5000,
+		max_bins: int = 50
+	):
 		self.xs = []
 		self.ys = []
 	
@@ -66,6 +93,9 @@ class _PointHandler:
 		start_idx = bisect.bisect_left(self.xs, start_val) - (1 if include_previous else 0)
 
 		return (self.xs[start_idx:], self.ys[start_idx:])
+	
+	def downsample(self) -> Tuple[List[int],List[int],List[int],List[int]]:
+		pass
 
 # TODO: fix
 class LossTracker:
