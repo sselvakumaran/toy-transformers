@@ -3,42 +3,23 @@
 import matplotlib.pyplot as plt
 import seaborn as sns
 import bisect
-from itertools import zip_longest
 import math
 from typing import Optional, List, Literal, Tuple
 from dataclasses import dataclass
 
-class _Binner:
-	@dataclass
-	class Bin:
-		count: int = 0
-		sum: int = 0
-		sum2: int = 0
-		min: int
-		max: int
-		start_x: int
-		end_x: int
-		start_idx: int
-		end_idx: int 
-
-	def __init__(self, estimated_samples: int, max_bins = 50):
-		self.bins = []
-
-	@staticmethod
-	def _calc_best_bin_size(x):
-		_b = lambda x: math.sqrt(2*x + 0.25) - 0.5
-		_A = lambda x, R: math.floor(_b(x) / R) + 1
-	
-
 # store 2d points easier
 # assumes inputted in non-decreasing order
+# handles exponential decay 
 class _PointHandler:
 	def __init__(self,
-		estimated_num_samples: int = 5000,
-		max_bins: int = 50
+		downsample_mode: Literal['exponential', 'triangular'] = 'triangular'
 	):
 		self.xs = []
 		self.ys = []
+
+		self.downsample_mode = downsample_mode
+		if self.downsample_mode == "exponential":
+			self.smoothed_ys = []
 	
 	def __bool__(self):
 		return len(self.xs) > 0 and len(self.ys) > 0
@@ -52,23 +33,22 @@ class _PointHandler:
 		x = x if x is not None else self.get_last_x() + 1
 		self.xs.append(x)
 		self.ys.append(y)
+
+		if self.downsample_mode == "exponential":
+			self.smoothed_ys.append(
+				self.alpha * y + (1 - self.alpha) * self.smoothed_ys[-1]
+				if len(self.smoothed_ys) > 0 else y
+			)
 	
-	def add_points(self, xs: List[int], ys: List[int]) -> None:
+	def add_points(self, xs: List[int], ys: List[float]) -> None:
 		if len(xs) != len(ys):
 			raise ValueError("lists are not of equal length")
-
-		xs_filtered, ys_filtered = zip(
-			*filter(
-				lambda t: t[1] is not None, 
-				zip(xs, ys)
-		))
-		
-		self.xs.extend(xs_filtered)
-		self.ys.extend(ys_filtered)
+		for x, y in zip(xs, ys):
+			self.add_point(x, y)	
 	
-	def get_last_point(self) -> Tuple[int, int]:
+	def get_last_point(self) -> Tuple[int, float]:
 		if not self:
-			return 0
+			return (0, -1)
 		return (self.xs[-1], self.ys[-1])
 	
 	def get_points(self):
@@ -94,8 +74,52 @@ class _PointHandler:
 
 		return (self.xs[start_idx:], self.ys[start_idx:])
 	
-	def downsample(self) -> Tuple[List[int],List[int],List[int],List[int]]:
-		pass
+	def downsample(self):
+		match self.downsample_mode:
+			case "exponential":
+				return self._downsample_exponential()
+			case "triangular":
+				return self._downsample_triangular()
+			case _:
+				raise ValueError("downsample method selected does not exist")
+		
+	def _downsample_exponential(self, 
+		resolution: int = 50
+	):
+		N = len(self.smoothed_ys)
+		if N <= resolution:
+			return (self.xs, self.smoothed_ys)
+		start_x, end_x = self.xs[0], self.xs[-1]
+		bin_size = (end_x - start_x) / (resolution - 1)
+		idx_per_bin = (N - 1) / (resolution - 1)
+		bin_xs = []
+		bin_ys = []
+		for i in range(resolution):
+			ideal_idx = i * idx_per_bin
+			l = int(ideal_idx)
+			t = ideal_idx - l
+			y0 = self.smoothed_ys[l]
+			y1 = self.smoothed_ys[l + 1] if l + 1 < N else y0
+
+			bin_xs.append(start_x + i * bin_size)
+			bin_ys.append(y0 * (1 - t) + y1 * t)
+		return (bin_xs, bin_ys)
+	
+	def _downsample_triangular(self):
+		out_xs = []
+		out_ys = []
+		s1, s2 = 0, 0
+		while s2 < len(self):
+			out_xs.append(self.xs[s2])
+			out_ys.append(self.ys[s2])
+			s1 += 1; s2 += s1
+		
+		if s2 + 1 != len(self):
+			out_xs.append(self.xs[-1])
+			out_ys.append(self.ys[-1])
+
+		return (out_xs, out_ys)
+			
 
 # TODO: fix
 class LossTracker:
@@ -137,14 +161,15 @@ class LossTracker:
 		ax1 = self.fig.add_subplot(gs[0, 0])
 		ax2 = self.fig.add_subplot(gs[0, 1], sharey=ax1)
 
-		trains = self.train_points.get_points()
-		vals = self.val_points.get_points()
+		# plot 1 lines
+		if self.train_points:
+			xs, ys = self.train_points.downsample()
+			sns.lineplot(x=xs, y=ys, ax=ax1, alpha=0.6, label="train")
+		if self.val_points:
+			xs, ys = self.val_points.downsample()
+			sns.lineplot(x=xs, y=ys, ax=ax1, label="val")
 
-		# plot 1
-		sns.lineplot(x=trains[0], y=trains[1], ax=ax1, alpha=0.6, label="train")
-		sns.lineplot(x=vals[0], y=vals[1], ax=ax1, label="val")
-		
-
+		# plot 1 last values
 		if self.train_points:
 			last_train_point = self.train_points.get_last_point()
 			ax1.scatter([last_train_point[0]], [last_train_point[1]], s=40, zorder=3)
@@ -152,17 +177,18 @@ class LossTracker:
 			last_val_point = self.val_points.get_last_point()
 			ax1.scatter([last_val_point[0]], [last_val_point[1]], s=40, zorder=3)
 		
-		# plot 2
+		# plot 2 local loss plot
 		recent_train_points = self.train_points.get_last_points()
 		recent_val_points = self.val_points.get_last_points(by='x')
 		sns.lineplot(x=recent_train_points[0], y=recent_train_points[1], ax=ax2, alpha=0.6)
 		sns.lineplot(x=recent_val_points[0], y=recent_val_points[1], ax=ax2)
 
 		ax2.get_yaxis().set_visible(False)
-
 		if len(self.train_points) > 50:
-			print(f"{len(self.train_points) - 49} {recent_val_points[0]}")
 			ax2.set_xlim(left=recent_train_points[0][1])
+
+		sns.despine(ax=ax1, offset=0.2)
+		sns.despine(ax=ax2, left = True, offset=0.2)
 
 		handles, labels = ax1.get_legend_handles_labels()
 		if handles:
@@ -170,30 +196,8 @@ class LossTracker:
 				ax1.get_legend().remove()
 			self.fig.legend(handles, labels, loc='upper right', bbox_to_anchor=(0.9, 0.9))
 
-		sns.despine(ax=ax1, offset=0.2)
-		sns.despine(ax=ax2, left = True, offset=0.2)
-
 		return self.fig
 
 	# Render and return figure to print
 	def render_full_figure(self) -> plt.Figure:
 		pass
-		# if self.y_train:
-		# 	if self.train_line:
-		# 		self.train_line.set_data(self.x, self.y_train)
-		# 	else:
-		# 		sns.lineplot(x=self.x, y=self.y_train, ax=self.ax1)
-		# 		self.train_line = self.ax1.lines[0]
-
-		# if any(y is not None for y in self.y_val):
-		# 	if self.val_line:
-		# 		self.val_line.set_data(self.x, self.y_val)
-		# 	else:
-		# 		sns.lineplot(x=self.x, y=self.y_val, ax=self.ax1)
-		# 		self.val_line = self.ax1.lines[1]
-		
-		# self.ax1.relim()
-		# self.ax1.autoscale_view()
-
-		# self.fig.canvas.draw_idle()
-		# return self.fig
