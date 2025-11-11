@@ -38,6 +38,7 @@ class LossPlotter:
 
         # Matplotlib objects
         self.fig, self.ax = plt.subplots(figsize=figsize)
+        plt.close(self.fig)
         self.train_line = None
         self.val_line = None
         # self.best_val_point = None # Removed
