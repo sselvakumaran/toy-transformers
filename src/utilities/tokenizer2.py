@@ -154,13 +154,13 @@ class _TokenList:
 		if self.counts[new_pair] == 1:
 			return new_pair
 
-def create_td(token_set: list) -> TokenDictionary:
+def _create_td(token_set: list) -> TokenDictionary:
 	idx_to_token = {i: t for i, t in enumerate(token_set)}
 	token_to_idx = {t: i for i, t in enumerate(token_set)}
 	return TokenDictionary(token_set, idx_to_token, token_to_idx)
 
 def create_tokenizer(data: str, num_tokens: int):
-	token_set, id_to_token, token_to_id = create_td(sorted(set(data)))
+	token_set, id_to_token, token_to_id = _create_td(sorted(set(data)))
 	text = np.array([token_to_id[token] for token in data], dtype=np.int16)
 
 	tokens = _TokenList(text)
@@ -185,6 +185,61 @@ def create_tokenizer(data: str, num_tokens: int):
 		token_count += 1
 	return TokenDictionary(token_set, id_to_token, token_to_id)
 
-if __name__ == '__main__':
-	data = "banana"
-	td = create_tokenizer(data, num_tokens=10)
+class _TrieNode:
+  def __init__(self):
+    self.children: Dict[str, _TrieNode] = {}
+    self.is_token = False
+
+class _Trie:
+  def __init__(self):
+    self.root = _TrieNode()
+  
+  def insert(self, token: str):
+    node = self.root
+    for c in token:
+      if c not in node.children:
+        node.children[c] = _TrieNode()
+      node = node.children[c]
+    node.is_token = True
+  
+  def create_from_set(tokens: list):
+    out = _Trie()
+    for token in tokens:
+      out.insert(token)
+    return out
+  
+  def strtok(self, text, i) -> str:
+    node = self.root
+    s = ""
+    longest_s = None
+    for i in range(i, len(text)):
+      c = text[i]
+      if c in node.children:
+        node = node.children[c]
+        s += c
+        if node.is_token:
+          longest_s = s
+      else:
+        break
+    return longest_s, i + len(longest_s)
+  
+  def tokenize(self, s: str):
+    tokens = []
+    i = 0
+    while i < len(s):
+      tok, j = self.strtok(s, i)
+      tokens.append(tok)
+      i = j
+    return tokens
+
+def reduce_token_dictionary(td: TokenDictionary, text: str) -> TokenDictionary:
+  trie: _Trie = _Trie.create_from_set(td.token_set)
+  new_token_set = sorted(set(trie.tokenize(text)))
+  return _create_td(new_token_set)
+
+def get_encoder(td: TokenDictionary) -> Callable:
+  trie: _Trie = _Trie.create_from_set(td.token_set)
+  return lambda s: list(map(td.token_to_idx.__getitem__, trie.tokenize(s)))
+
+def get_decoder(td: TokenDictionary) -> Callable:
+  return lambda s: list(map(td.idx_to_token.__getitem__, s))
