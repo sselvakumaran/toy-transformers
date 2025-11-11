@@ -78,7 +78,6 @@ class FeedForward(nn.Module):
 	def forward(self, x):
 		return self.net(x)
 
-
 class Block(nn.Module):
 	def __init__(self, config: GPTv1Config):
 		super().__init__()
@@ -109,6 +108,20 @@ class LanguageModel(nn.Module):
 			nn.LayerNorm(n_embed),
 		)
 		self.lm_head = nn.Linear(n_embed, vocab_size)
+
+		self.apply(self._init_weights)
+	
+	@staticmethod
+	def _init_weights(module):
+		if isinstance(module, nn.Linear):
+			nn.init.normal_(module.weight, mean=0.0, std=0.02)
+			if module.bias is not None:
+				nn.init.zeros_(module.bias)
+		elif isinstance(module, nn.Embedding):
+			nn.init.normal_(module.weight, mean=0.0, std=0.02)
+		elif isinstance(module, nn.LayerNorm):
+			nn.init.ones_(module.weight)
+			nn.init.zeros_(module.bias)
 
 	def forward(self, idx, targets=None):
 		B, T = idx.shape
@@ -145,3 +158,4 @@ class LanguageModel(nn.Module):
 			idx_next = torch.multinomial(probs, num_samples = 1)
 			idx = torch.cat((idx, idx_next), dim=1)
 			yield idx_next
+	
