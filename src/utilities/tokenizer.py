@@ -128,7 +128,7 @@ def _create_td(token_set: list) -> TokenDictionary:
 	token_to_idx = {t: i for i, t in enumerate(token_set)}
 	return TokenDictionary(token_set, idx_to_token, token_to_idx)
 
-def create_tokenizer(data: str, num_tokens: int, pattern: Optional[str] = None):
+def create_tokenizer(data: str, num_tokens: int, pattern: Optional[str] = None, predefined: Optional[list[str]] = None):
 	pattern = re.compile(
 		pattern or r"(\w+'\w+)| ?(\w+)|([^\w\s])|(\s+(?!\S))|(\s+)"
 	)
@@ -136,7 +136,12 @@ def create_tokenizer(data: str, num_tokens: int, pattern: Optional[str] = None):
 	for match in re.finditer(pattern, data):
 		boundaries.add(match.start() + len(match.group(0)) - 1)
 
-	token_set, id_to_token, token_to_id = _create_td(sorted(set(data)))
+	base_tokens = sorted(set(data))
+	predefined_tokens = predefined or []
+
+	base_tokens = list(filter(lambda x: x not in base_tokens, predefined_tokens)) + base_tokens
+
+	token_set, id_to_token, token_to_id = _create_td(base_tokens)
 	
 	text = np.array([token_to_id[token] for token in data], dtype=np.int16)
 

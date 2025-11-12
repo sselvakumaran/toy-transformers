@@ -17,6 +17,7 @@ class GPTv2Config:
 	n_layers: int = 6 # number of blocks
 	dropout: float = 0.2 # number of nodes to randomly drop to reduce overfit
 	device: str = "mps"
+	checkpoint: bool = False
 
 class CausalSelfAttention(nn.Module):
 	def __init__(self, config: GPTv2Config):
@@ -30,8 +31,6 @@ class CausalSelfAttention(nn.Module):
 		self.qkv_block = nn.Linear(self.n_embed, 3 * self.n_embed)
 		self.proj = nn.Linear(config.n_embed, config.n_embed)
 		self.proj.__INIT_SCALAR__ = (2 * config.n_layers) ** -0.5
-		self.n_heads = config.n_heads
-		self.n_embed = config.n_embed
 
 		self.proj_dp = nn.Dropout(config.dropout)
 		self.dropout = config.dropout
@@ -81,7 +80,6 @@ class TransformerBlock(nn.Module):
 		# residual connections
 		attn_add = self.attn(self.ln1(x))
 		x = torch.add(x, attn_add)
-
 		mlp_add = self.mlp(self.ln2(x))
 		x = torch.add(x, mlp_add)
 		return x
@@ -109,6 +107,9 @@ class LanguageModel(nn.Module):
 					torch.nn.init.zeros_(module.bias)
 			elif isinstance(module, nn.Embedding):
 				torch.nn.init.normal_(module.weight, mean=0.0, std=base_std)
+			elif isinstance(module, nn.LayerNorm):
+				torch.nn.init.ones_(module.weight)
+				torch.nn.init.zeros_(module.bias)
 
 		self.apply(_init_weights)
 	
@@ -120,7 +121,11 @@ class LanguageModel(nn.Module):
 		tok_e = self.token_embed(idx)
 		x = torch.add(pos_e, tok_e)
 		x = self.dp(x)
-		x = self.blocks(x)
+		if self.config.checkpoint:
+			for block in self.blocks:
+				x = torch.utils.checkpoint.checkpoint(block, x)
+		else:
+			x = self.blocks(x)
 		x = self.ln(x)
 		if targets is None:
 			logits = self.head(x[:, [-1], :])
@@ -130,7 +135,7 @@ class LanguageModel(nn.Module):
 		loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
 		return logits, loss
 		
-	def get_optimizer(self, weight_decay, learning_rate, b1=0.9, b2=0.95, eps=1e-8):
+	def get_optimizer(self, weight_decay, lr, b1=0.9, b2=0.95, eps=1e-8):
 		params: Dict[str, nn.Parameter] = dict(filter(lambda t: t[1].requires_grad, self.named_parameters()))
 		decay_params = [p for _, p in params.items() if p.dim() >= 2]
 		nodecay_params = [p for _, p in params.items() if p.dim() < 2]
@@ -138,15 +143,25 @@ class LanguageModel(nn.Module):
 			{'params': decay_params, 'weight_decay': weight_decay},
 			{'params': nodecay_params, 'weight_decay': 0.0}
 		]
-		return torch.optim.AdamW(optimization_groups, lr=learning_rate, betas=(b1, b2), eps=eps)
+		return torch.optim.AdamW(optimization_groups, lr=lr, betas=(b1, b2), eps=eps)
 
-	def get_num_parameters(self):
-		return sum(p.numel() for p in self.parameters())
+	def get_num_parameters(self, as_str=False):
+		n = sum(p.numel() for p in self.parameters())
+		if not as_str:
+			return n
+		
+		sfxs = [(10 ** 9, 'b'), (10 ** 6, 'm'), (10 ** 3, 'k')]
+		for threshold, sfx in sfxs:
+			if n > threshold:
+				frac = n / threshold
+				return f"{frac:.3f}{sfx}"
+		return f"{n}"
 
 	@torch.no_grad()
-	def generate(self, seed: torch.Tensor, max_new_tokens, topk=-1):
-		idx = seed 
-		device = seed.device
+	def generate(self, seed: torch.Tensor, max_new_tokens, temperature=1.0, topk=-1):
+		device = self.config.device
+		idx = seed.to(device)
+		self.eval()
 		for _ in range(max_new_tokens):
 			idx_cond = idx[:, -self.config.block_size:]
 			_, T = idx_cond.shape
@@ -154,7 +169,7 @@ class LanguageModel(nn.Module):
 				with torch.autocast(device_type=device, dtype=torch.bfloat16):
 					logits, _ = self(idx_cond)
 				logits = logits[:, -1, :]
-				probs = F.softmax(logits, dim = -1)
+				probs = F.softmax(logits / temperature, dim = -1)
 				if topk <= 0:
 					xcol = torch.multinomial(probs, num_samples = 1)
 				else:
@@ -163,3 +178,4 @@ class LanguageModel(nn.Module):
 					xcol = torch.gather(top_i, -1, ix)
 				idx = torch.cat((idx, xcol), dim=1)
 				yield xcol
+		self.train()
