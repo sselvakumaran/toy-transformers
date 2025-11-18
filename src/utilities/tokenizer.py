@@ -1,4 +1,4 @@
-from typing import Dict, Callable, Set, Optional
+from typing import Dict, Callable, Set, Optional, List
 import heapq
 from collections import Counter, namedtuple, defaultdict
 import numpy as np
@@ -35,27 +35,29 @@ class _LazyHeap():
 	def push(self, item):
 		heapq.heappush(self.heap, item)
 
-
 class _TokenList:
-	def __init__(self, text: np.ndarray, boundaries: Optional[Set[int]] = None, verbose=False):
-		N = len(text)
+	def __init__(self, chunks: np.ndarray, weights: np.ndarray, boundaries: Optional[Set[int]] = None, verbose=False):
+		N = len(chunks)
 		self.N = N
-		self.tokens = np.copy(text).astype(np.int16, copy=False)
+		self.tokens = np.copy(chunks).astype(np.int16, copy=False)
+		self.weights = weights
 		self.prev = np.arange(-1, N - 1)
 		self.next = np.arange(1, N + 1)
 		self.boundaries = boundaries or set() 
 		self.pairs = defaultdict(set)
 		self.counts = defaultdict(int)
+
 		iter = range(N - 1)
 		if verbose:
 			from tqdm import tqdm
 			iter = tqdm(iter, desc="initializing tokens")
+		
 		for i in iter:
 			if i in self.boundaries: # boundaries -> blocks (i, i + 1) from merging
 				continue
-			pair = (int(text[i]), int(text[i+1]))
-			self.pairs[pair].add(int(i))
-			self.counts[pair] += 1
+			pair = (int(chunks[i]), int(chunks[i+1]))
+			self.pairs[pair].add(i)
+			self.counts[pair] += self.weights[i]
 	
 	def get_key_list(self):
 		return [(-count, pair) for pair, count in self.counts.items()]
@@ -143,20 +145,48 @@ def create_tokenizer(
 	pattern = re.compile(
 		pattern or r"(\w+'\w+)| ?(\w+)|([^\w\s])|(\s+(?!\S))|(\s+)"
 	)
-	boundaries = set()
-	for match in re.finditer(pattern, data):
-		boundaries.add(match.start() + len(match.group(0)) - 1)
 
-	base_tokens = sorted(set(data))
-	predefined_tokens = predefined or []
+	if verbose:
+		from tqdm import tqdm
 
+	word_counts = Counter()
+
+	iter = re.finditer(pattern, data)
+	if verbose:
+		iter = tqdm(iter, desc="pre-tokenizing data", unit="chunks")
+	for match in iter:
+		word_counts[match.group(0)] += 1
+	
+	if verbose: print(f"found {len(word_counts)} unique words")
+
+	base_tokens = set()
+	for word in word_counts.keys():
+		base_tokens.update(word)
+	base_tokens = sorted(list(base_tokens))
+
+	predefined_tokens = ["<UNK>", *predefined] if predefined else ["<UNK>"]
 	base_tokens = list(filter(lambda x: x not in base_tokens, predefined_tokens)) + base_tokens
 
 	token_set, id_to_token, token_to_id = _create_td(base_tokens)
-	
-	text = np.array([token_to_id[token] for token in data], dtype=np.int16)
 
-	tokens = _TokenList(text, boundaries=boundaries, verbose=verbose)
+	chunks_lst = []
+	weights = []
+	boundaries = set()
+
+	curr_idx = 0
+	for word, count in word_counts.items():
+		w_indices = [token_to_id[c] for c in word]
+		w_len = len(w_indices)
+		chunks_lst.extend(w_indices)
+		weights.extend([count] * w_len)
+		curr_idx += w_len
+		boundaries.add(curr_idx - 1)
+
+	chunks = np.array(chunks_lst, dtype=np.int16)
+	weights = np.array(weights, dtype=np.int32)
+
+	tokens = _TokenList(chunks, weights, boundaries=boundaries, verbose=verbose)
+	
 	heap = _LazyHeap(
 		is_valid = lambda neg_c, pair: tokens.get_count(pair) == -neg_c,
 		update = lambda _, pair: (-tokens.get_count(pair), pair),
@@ -181,13 +211,15 @@ def create_tokenizer(
 		token_set.append(new_token_str)
 		id_to_token[new_token] = new_token_str
 		token_to_id[new_token_str] = new_token
-		# replace (a, b)
+
 		modified = tokens.merge(t1, t2, new_token)
 		for pair in modified:
 			heap.push((-tokens.get_count(pair), pair))
+
 		token_count += 1
 		if verbose:
 			pbar.update(1)
+		
 	return TokenDictionary(token_set, id_to_token, token_to_id)
 
 class _TrieNode:
@@ -234,6 +266,7 @@ class _Trie:
 	def tokenize(self, s: str):
 		tokens = []
 		i = 0
+
 		while i < len(s):
 			tok, j = self.strtok(s, i)
 			tokens.append(tok)
@@ -245,9 +278,33 @@ def reduce_token_dictionary(td: TokenDictionary, text: str) -> TokenDictionary:
 	new_token_set = sorted(set(trie.tokenize(text)))
 	return _create_td(new_token_set)
 
-def get_encoder(td: TokenDictionary) -> Callable:
+def get_encoder(td: TokenDictionary, pattern: Optional[str] = None, verbose=False) -> Callable:
 	trie: _Trie = _Trie.create_from_set(td.token_set)
-	return lambda s: list(map(td.token_to_idx.__getitem__, trie.tokenize(s)))
+	pattern = re.compile(
+		pattern or r"(\w+'\w+)| ?(\w+)|([^\w\s])|(\s+(?!\S))|(\s+)"
+	)
+	cache: Dict[str, List[int]] = dict()
+
+	def encode_chunk(chunk: str) -> List[int]:
+		return list(map(td.token_to_idx.__getitem__, trie.tokenize(chunk)))
+	
+	def encode(text: str) -> List[int]:
+		out = []
+		iter = re.finditer(pattern, text)
+		if verbose:
+			from tqdm import tqdm
+			iter = tqdm(iter, desc="encoding chunks", unit="chunk")
+		for match in iter:
+			chunk = match.group(0)
+			addn = []
+			if chunk in cache:
+				addn = cache[chunk]
+			else:
+				addn = encode_chunk(chunk)
+				cache[chunk] = addn
+			out.extend(addn)
+		return out
+	return encode
 
 def get_decoder(td: TokenDictionary) -> Callable:
 	return lambda b: list(map(td.idx_to_token.__getitem__, b))

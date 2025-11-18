@@ -66,7 +66,6 @@ def tokenize_from_json(
 	encode = tokenizer.get_encoder(td)
 	out = torch.tensor(encode(data), dtype=torch.long)
 	try:
-		print(os.path.exists(out_fn), os.path.dirname(out_fn))
 		if not os.path.exists(out_fn) and os.path.dirname(out_fn) != '':
 			os.makedirs(os.path.dirname(out_fn), exist_ok=True)
 		torch.save(out, out_fn)
@@ -103,7 +102,7 @@ def tokenize_from_scratch(
 	if not ok:
 		return False
 	
-	encode = tokenizer.get_encoder(td)
+	encode = tokenizer.get_encoder(td, pattern=pattern, verbose=True)
 	out = torch.tensor(encode(data), dtype=torch.long)
 	try:
 		if not os.path.exists(out_fn) and os.path.dirname(out_fn) != '':

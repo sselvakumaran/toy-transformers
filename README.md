@@ -18,10 +18,11 @@
 - clean up having data in repo (not needed)
 - easier interfaces to process text
 - make easier model switchout / dropin
-- `<UNK>` should be built into tokenizer
+- ~~`<UNK>` should be built into tokenizer~~ (could be cleaner)
 - fix tokenization script name
 - tokenization should add checksum to verify correct token dictionary
-- tokenization defaults 
+- add used pattern to stored token dictionary (since changes encoder)
+- tokenization argument defaults + file location defaults
 - fix "verbose"
 
 # LIST
