@@ -18,6 +18,11 @@
 - clean up having data in repo (not needed)
 - easier interfaces to process text
 - make easier model switchout / dropin
+- `<UNK>` should be built into tokenizer
+- fix tokenization script name
+- tokenization should add checksum to verify correct token dictionary
+- tokenization defaults 
+- fix "verbose"
 
 # LIST
 1. Figure out issue with GPTv2
