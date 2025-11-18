@@ -4,7 +4,13 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Dict, Literal
 
-# Version 2 - adding flash attention + some structural changes
+# Version 3 - adding...
+# RMSNorm
+# RoPE
+# SwiGLU
+# Checkpointing
+# Learned layer-scaling for attention blocks
+# MoE + LoRA ability (maybe)
 
 @dataclass(frozen=True)
 class GPTv2Config:
@@ -70,9 +76,9 @@ class MultiLayerPerceptron(nn.Module):
 class TransformerBlock(nn.Module):
 	def __init__(self, config: GPTv2Config):
 		super().__init__()
-		self.norm1 = nn.LayerNorm(config.n_embed)
+		self.norm1 = nn.RMSNorm(config.n_embed)
 		self.attn = CausalSelfAttention(config)
-		self.norm2 = nn.LayerNorm(config.n_embed)
+		self.norm2 = nn.RMSNorm(config.n_embed)
 		self.mlp = MultiLayerPerceptron(config)
 	
 	def forward(self, x: torch.Tensor):
@@ -92,7 +98,7 @@ class LanguageModel(nn.Module):
 		self.position_embed = nn.Embedding(config.block_size, config.n_embed)
 		self.dp = nn.Dropout(config.dropout)
 		self.blocks = nn.Sequential(*[TransformerBlock(config) for _ in range(config.n_layers)])
-		self.ln = nn.LayerNorm(config.n_embed)
+		self.ln = nn.RMSNorm(config.n_embed)
 		self.head = nn.Linear(config.n_embed, config.vocab_size, bias=False)
 		self.token_embed.weight = self.head.weight
 
@@ -106,9 +112,8 @@ class LanguageModel(nn.Module):
 					torch.nn.init.zeros_(module.bias)
 			elif isinstance(module, nn.Embedding):
 				torch.nn.init.normal_(module.weight, mean=0.0, std=base_std)
-			elif isinstance(module, nn.LayerNorm):
+			elif isinstance(module, nn.RMSNorm):
 				torch.nn.init.ones_(module.weight)
-				torch.nn.init.zeros_(module.bias)
 
 		self.apply(_init_weights)
 	
