@@ -7,7 +7,7 @@ import json
 import torch
 import argparse
 
-def _write_tokenization(td: tokenizer.TokenDictionary, fn: str) -> bool:
+def write_tokenization(td: tokenizer.TokenDictionary, fn: str) -> bool:
 	assert isinstance(td, tokenizer.TokenDictionary), "_write_tokenization requires TokenDictionary"
 
 	if not os.path.exists(fn) and os.path.dirname(fn) != '':
@@ -28,13 +28,16 @@ def _write_tokenization(td: tokenizer.TokenDictionary, fn: str) -> bool:
 
 	return True
 
-def _read_tokenization(fn: str) -> Optional[tokenizer.TokenDictionary]:
+def read_tokenization(fn: str) -> Optional[tokenizer.TokenDictionary]:
 	try:
 		with open(fn, "r") as file:
 			d = json.load(file)
-			return tokenizer.TokenDictionary(*d)
+			td = tokenizer.TokenDictionary(*d)
+			# json converts keys to strs, must convert back
+			new_idx_to_token =dict(map(lambda t: (int(t[0]), t[1]), td.idx_to_token.items()))
+			return td._replace(idx_to_token=new_idx_to_token)
 	except FileNotFoundError:
-		print("file not found: {fn}"); return None
+		print(f"file not found: {fn}"); return None
 	except (IOError, OSError) as e:
 		print(f"error reading file '{fn}': {e}"); return None
 	except json.decoder.JSONDecodeError as e:
@@ -59,11 +62,11 @@ def tokenize_from_json(
 	except (IOError, OSError) as e:
 		print(f"error reading file '{in_fn}': {e}"); return False
 	
-	td = _read_tokenization(tokenization_json_fn)
+	td = read_tokenization(tokenization_json_fn)
 	if not td:
 		exit(1)
 	
-	encode = tokenizer.get_encoder(td)
+	encode = tokenizer.get_encoder(td, verbose=True)
 	out = torch.tensor(encode(data), dtype=torch.long)
 	try:
 		if not os.path.exists(out_fn) and os.path.dirname(out_fn) != '':
@@ -84,10 +87,6 @@ def tokenize_from_scratch(
 	pattern: Optional[str] = None,
 	predefined: Optional[list[str]] = None,
 ) -> bool:
-	# open in file, read, close
-	# create tokenization
-	# open out file, write, close
-
 	try:
 		with open(in_fn, 'r') as file:
 			data = file.read()
@@ -95,10 +94,9 @@ def tokenize_from_scratch(
 		print("file not found: {fn}"); return False
 	except (IOError, OSError) as e:
 		print(f"error reading file '{in_fn}': {e}"); return False
-	print("starting to tokenize...")
 	td = tokenizer.create_tokenizer(data, num_tokens, pattern=pattern, predefined=predefined, verbose=True)
 
-	ok = _write_tokenization(td, tokenization_json_fn)
+	ok = write_tokenization(td, tokenization_json_fn)
 	if not ok:
 		return False
 	
@@ -114,9 +112,6 @@ def tokenize_from_scratch(
 		print(f"error writing tokenized data: {e}"); return False
 	
 	return True
-
-def get_encoder_decoder():
-	pass
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(

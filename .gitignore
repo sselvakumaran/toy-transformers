@@ -1,4 +1,5 @@
 /venv
 /env_datasets
 /.cache
-/data/raw
+/data
+/artifacts

@@ -26,8 +26,7 @@
 - fix "verbose"
 
 # LIST
-1. Figure out issue with GPTv2
-2. Tokenization script
-3. C++ tokenizer (if incredibly slow)
-4. GPTv3 with transformer-XL and alibi
-5. Deepseek
+1. Tokenization script
+2. C++ tokenizer (if incredibly slow)
+3. GPTv3 with transformer-XL and alibi
+4. Deepseek

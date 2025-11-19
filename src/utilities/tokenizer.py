@@ -293,7 +293,7 @@ def get_encoder(td: TokenDictionary, pattern: Optional[str] = None, verbose=Fals
 		iter = re.finditer(pattern, text)
 		if verbose:
 			from tqdm import tqdm
-			iter = tqdm(iter, desc="encoding chunks", unit="chunk")
+			iter = tqdm(iter, desc="encoding chunks", unit="chunks")
 		for match in iter:
 			chunk = match.group(0)
 			addn = []
