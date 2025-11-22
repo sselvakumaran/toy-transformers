@@ -1,5 +1,6 @@
 /venv
-/env_datasets
 /.cache
 /data
+/runs
 /artifacts
+/.vscode
