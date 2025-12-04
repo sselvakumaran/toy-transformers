@@ -1,6 +1,6 @@
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, NamedTuple, Protocol, Self, Tuple, Union
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, TypeGuard, Union
 import torch
 # savable things should have save() function then use hasattr
 
@@ -42,10 +42,19 @@ class TorchTensorRef:
   tensor: torch.Tensor
 
 @dataclass(frozen=True)
-class TorchModuleStateRef:
+class TorchStateDictRef:
   state_dict: Dict[str, Any]
 
-Savable = Union[Serializable | TorchTensorRef | TorchModuleStateRef]
+Savable = Union[Serializable | TorchTensorRef | TorchStateDictRef]
+
+
+
+def parse_spec(
+    spec: Dict[str, Savable]
+) -> Optional[Tuple[Dict[str, Serializable], Callable[[str], None]]]:
+  if type(spec) != dict:
+    raise ValueError("spec formatting incorrect: must be dict")
+  pass
 
 def save(
   spec: Dict[str, Savable],
@@ -58,11 +67,10 @@ def save(
   This functionality is to store metadata in easier to read formatting and provide
   greater transparency and convenience in saving and loading experiments.
   """
-  if type(spec) != dict:
-    pass
+  # a) (parse spec -> json, other files)
+  # b) save data
   for key, val in spec.items():
     pass
-  
 
 def load(
   path: str,
