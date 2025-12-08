@@ -27,8 +27,8 @@ class TestIOMethods(unittest.TestCase):
 		
 		obj1 = Config(vocab_size=513)
 
-		io_old.save(obj1.to_savable(), path="temp/iotests/test1.json")
-		obj2 = Config.from_serializable(io_old.load(path="temp/iotests/test1.json"))
+		io.save(obj1.to_savable(), path="temp/iotests/test1.json")
+		obj2 = Config.from_serializable(io.load(path="temp/iotests/test1.json"))
 
 		self.assertEqual(obj1, obj2)
 

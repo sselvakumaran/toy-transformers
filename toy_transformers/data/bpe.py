@@ -3,8 +3,9 @@ import heapq
 from collections import Counter, namedtuple, defaultdict
 import numpy as np
 import re
+import string
 
-TokenDictionary = namedtuple('TokenDictionary', 
+TokenDictionary = namedtuple('TokenDictionary',
 	['token_set', 'idx_to_token', 'token_to_idx']
 )
 
