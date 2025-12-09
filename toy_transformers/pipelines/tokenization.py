@@ -7,8 +7,17 @@ import json
 import torch
 import argparse
 
+from toy_transformers.utilities import io
+def _td_save(td: tokenizer.TokenDictionary):
+	return {
+		'vocab_size': len(td.token_set),
+	}
+def _td_load(obj):
+	pass
+
+
 def write_tokenization(td: tokenizer.TokenDictionary, fn: str) -> bool:
-	assert isinstance(td, tokenizer.TokenDictionary), "_write_tokenization requires TokenDictionary"
+	assert isinstance(td, tokenizer.TokenDictionary), "write_tokenization requires TokenDictionary"
 
 	if not os.path.exists(fn) and os.path.dirname(fn) != '':
 		try:

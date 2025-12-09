@@ -21,14 +21,19 @@ Serializable = Union[
 @runtime_checkable
 class SavableProtocol(Protocol):
   name: str
-  def encode(self) -> Serializable:
+
+  def encode(self) -> Tuple[Serializable, List['SavableProtocol']]:
+    """return (serializable_representation, list_of_references)"""
     ...
   @classmethod
   def decode(cls, obj: Serializable) -> Self:
+    """construct object from serialized form (without loading files)"""
     ...
   def write(self, dirname: str) -> None:
+    """write associated file into directory"""
     ...
   def read(self, dirname: str) -> Self:
+    """load associated file from directory"""
     ...
 
 CUSTOM_SERIALIZABLE_TYPES: Dict[str, type] = dict()
@@ -47,9 +52,16 @@ def encode(obj: Savable) -> Tuple[Serializable, List[SavableProtocol]]:
     case int(v) | float(v) | bool(v) | str(v):
       return (v, [])
     case list(v):
-      vals = zip(*[encode(el) for el in v])
-      return (vals[0], flatten_list(vals[1]))
+      if not v:
+        return ([], [])
+      encoded = [encode(el) for el in v]
+      return (
+        [s for s, _ in encoded],
+        flatten_list([r for _, r in encoded])
+      )
     case dict(d):
+      if not d:
+        return ({}, [])
       pairs = {k: encode(v) for k, v in d.items()}
       return (
         {k: s for k, (s, _) in pairs.items()},
@@ -58,7 +70,7 @@ def encode(obj: Savable) -> Tuple[Serializable, List[SavableProtocol]]:
     case SavableProtocol():
       return obj.encode()
     case _:
-      raise TypeError(f"cannot encode object {obj}")
+      raise TypeError(f"cannot encode object of type {type(obj)}: {obj}")
 
 def decode(obj: Serializable) -> Tuple[Savable, SavableProtocol]:
   match obj:
@@ -84,20 +96,18 @@ def decode(obj: Serializable) -> Tuple[Savable, SavableProtocol]:
 
 def save(obj: Savable, path: str) -> None:
   metadata, refs = encode(obj)
-  if not os.path.exists(path):
-    try: os.makedirs(path, exist_ok=True)
-    except OSError as e: raise ValueError(f"error creating directory for {path}") from e
+
+  unique_refs = {ref.name: ref for ref in refs}
+
+  os.makedirs(path, exist_ok=True)
 
   # write JSON
   with open(os.path.join(path, "metadata.json"), "w+") as file:
-    json.dump(metadata, file, indent=4)
+    json.dump(metadata, file, indent=2)
   
   # write references
-  for ref in refs:
-    try:
-      ref.write(path)
-    except Exception as e:
-      raise IOError(f"error writing {type(ref).__name__}") from e
+  for ref in unique_refs.values():
+    ref.write(path)
 
 def load(path: str) -> Savable:
   try:
@@ -112,12 +122,18 @@ def load(path: str) -> Savable:
     raise IOError("error reading object") from e
 
 @custom_serializable_type("TorchTensorRef")
-@dataclass()
+@dataclass
 class TorchTensorRef:
   name: str
   tensor: Optional[torch.Tensor] = None
 
+  def __post_init__(self):
+    if not self.name.endswith('.pt'):
+      self.name = f"{self.name}.pt"
+
   def encode(self) -> Tuple[Serializable, List[SavableProtocol]]:
+    if self.tensor is None:
+      raise ValueError(f"cannot encode TorchTensorRef '{self.name}' with None tensor")
     return ({
       "__type__": self.__typename__,
       "__ref__": self.name,
@@ -125,13 +141,18 @@ class TorchTensorRef:
   
   @classmethod
   def decode(cls, obj: Serializable):
+    if not isinstance(obj, dict):
+      raise TypeError(f"expected dict, got {type(obj)}")
     return TorchTensorRef(name=obj["__ref__"])
   
   def write(self, dirname: str):
+    if self.tensor is None:
+      raise ValueError(f"cannot write TorchTensorRef '{self.name}' with None tensor")
     torch.save(self.tensor, os.path.join(dirname, self.name))
     
   def read(self, dirname: str) -> Self:
-    self.tensor = torch.load(os.path.join(dirname, self.name))
+    self.tensor = torch.load(os.path.join(dirname, self.name), weights_only=True)
+    return self
 
 # class Config(dataclass):
 #   vocab_size: int
