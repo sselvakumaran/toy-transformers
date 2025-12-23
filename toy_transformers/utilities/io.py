@@ -77,8 +77,8 @@ def decode(obj: Serializable) -> Tuple[Savable, SavableProtocol]:
     case int(v) | float(v) | bool(v) | str(v):
       return (v, [])
     case list(v):
-      vals = zip(*[decode(el) for el in v])
-      return (vals[0], flatten_list(vals[1]))
+      vals = list(zip(*[decode(el) for el in v]))
+      return (vals[0], flatten_list(vals[1])) if vals else ([], [])
     case dict(d) if "__type__" not in d:
       pairs = {k: decode(v) for k, v in d.items()}
       return (
