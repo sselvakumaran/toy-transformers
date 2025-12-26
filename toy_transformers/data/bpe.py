@@ -30,14 +30,12 @@ class TokenizationMode(Enum):
 	STR = "str"
 	BYTES = "bytes"
 
-	_ignore_ = ['_TYPE_MAP']
-	_TYPE_MAP = {
-		"str": str,
-		"bytes": bytes
-	}
+	@property
+	def python_type(self):
+		return str if self == TokenizationMode.STR else bytes
 
 	def match(self, tok) -> bool:
-		return isinstance(tok, self._TYPE_MAP[self.value])
+		return isinstance(tok, self.python_type)
 
 @dataclass
 class BPEConfig():
@@ -121,13 +119,13 @@ class Vocabulary():
 	
 	@cached_property
 	def _trie(self) -> _Trie:
-		return _Trie(self.mode, self.tokens)
+		return _Trie(self.config.mode, self.tokens)
 	
 	def encode(self, text: TokenSequence):
-		if not self.mode.match(text):
+		if not self.config.mode.match(text):
 			raise ValueError(f"cannot use type f{type(text).__name__} on {self.mode}-based vocab")
 		out = []
-		iter: Iterator[re.Match] = re.finditer(self.pattern, text)
+		iter: Iterator[re.Match] = re.finditer(self.config.pattern, text)
 		for match in iter:
 			chunk = match.group(0)
 			addn = []
@@ -135,12 +133,22 @@ class Vocabulary():
 				addn.append(self.token_to_idx[tok])
 			out.extend(addn)
 		return out
+	
+	def __hash__(self):
+		h = 0
+		for token in self.tokens:
+			h ^= hash(token)
+		return hash((self.config.mode, h))
 
 	def decode(self, idxs: List[int]):
 		return [self.tokens[idx] for idx in idxs]
 	
 	def to_state_dict(self) -> io.Savable:
 		return {
+			"metadata": {
+				"type": "Vocabulary",
+				"version": ""
+			},
 			"config": {
 				"mode": self.config.mode.value,
 				"vocab_size": self.config.vocab_size,
