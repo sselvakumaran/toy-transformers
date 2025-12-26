@@ -1,0 +1,13 @@
+{
+  "metadata": {
+    "type": "TokenizedData",
+    "module": "toy_transformers.pipelines.tokenization",
+    "git_hash": "f71df24"
+  },
+  "mode": "str",
+  "vocab_hash": -3153245102022464363,
+  "data": {
+    "__type__": "TorchTensorRef",
+    "__ref__": "data.pt"
+  }
+}
