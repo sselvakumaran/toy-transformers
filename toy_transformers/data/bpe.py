@@ -9,6 +9,7 @@ import re
 import base64
 
 from toy_transformers.utilities import io
+from toy_transformers.utilities import version
 from io import TextIOBase, BufferedIOBase, RawIOBase
 Token = str | bytes
 TokenSequence = str | bytes
@@ -138,17 +139,18 @@ class Vocabulary():
 		h = 0
 		for token in self.tokens:
 			h ^= hash(token)
-		return hash((self.config.mode, h))
+		return hash((self.config.mode.value, h))
 
 	def decode(self, idxs: List[int]):
 		return [self.tokens[idx] for idx in idxs]
 	
 	def to_state_dict(self) -> io.Savable:
 		return {
-			"metadata": {
-				"type": "Vocabulary",
-				"version": ""
-			},
+			"metadata": version.get_obj_metadata(
+				self,
+				include_timestamp=False,
+				include_hash=True
+			),
 			"config": {
 				"mode": self.config.mode.value,
 				"vocab_size": self.config.vocab_size,
@@ -271,7 +273,6 @@ def _stream_chunks(
 			pbar.update(len(incoming_chunk))
 		
 		chunk = remainder + incoming_chunk
-		last_end = 0
 		last_match = None
 		for m in pattern.finditer(chunk):
 			if last_match is not None:
