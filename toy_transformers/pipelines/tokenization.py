@@ -9,8 +9,6 @@ from toy_transformers.utilities import io
 from toy_transformers.utilities.io import TorchTensorRef
 from toy_transformers.utilities.version import get_obj_metadata
 
-## NEW FUNCTIONALITY
-
 class TokenizedData:
 	vocab: Optional[tokenizer.Vocabulary]
 	data: torch.Tensor
