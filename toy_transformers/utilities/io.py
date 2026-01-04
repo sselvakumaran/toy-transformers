@@ -5,6 +5,7 @@ import json
 import torch
 import functools
 import operator
+import csv
 
 flatten_list = lambda l: functools.reduce(operator.iconcat, l, [])
 
@@ -152,6 +153,76 @@ class TorchTensorRef:
     
   def read(self, dirname: str) -> Self:
     self.tensor = torch.load(os.path.join(dirname, self.name), weights_only=True)
+    return self
+
+@custom_serializable_type("TorchStateDictRef")
+@dataclass
+class TorchStateDictRef:
+  name: str
+  state_dict: Optional[dict] = None
+
+  def __post_init__(self):
+    if not self.name.endswith('.pt'):
+      self.name = f"{self.name}.pt"
+
+  def encode(self) -> Tuple[Serializable, List[SavableProtocol]]:
+    if self.state_dict is None:
+      raise ValueError(f"cannot encode TorchStateDictRef '{self.name}' with None dict")
+    return ({
+      "__type__": self.__typename__,
+      "__ref__": self.name,
+    }, [self])
+  
+  @classmethod
+  def decode(cls, obj: Serializable):
+    if not isinstance(obj, dict):
+      raise TypeError(f"expected dict, got {type(obj)}")
+    return TorchStateDictRef(name=obj["__ref__"])
+  
+  def write(self, dirname: str):
+    if self.state_dict is None:
+      raise ValueError(f"cannot write TorchStateDictRef '{self.name}' with None tensor")
+    torch.save(self.state_dict, os.path.join(dirname, self.name))
+    
+  def read(self, dirname: str) -> Self:
+    self.state_dict = torch.load(os.path.join(dirname, self.name), weights_only=True)
+    return self
+
+@custom_serializable_type("TrainingLogRef")
+@dataclass
+class TrainingLogRef:
+  name: str
+  logs: Optional[List[List[Union[str, int, float, bool]]]] = None
+
+  def __post_init__(self):
+    if not self.name.endswith('.csv'):
+      self.name = f"{self.name}.csv"
+
+  def encode(self) -> Tuple[Serializable, List[SavableProtocol]]:
+    if self.state_dict is None:
+      raise ValueError(f"cannot encode TrainingLogRef '{self.name}' with None array")
+    return ({
+      "__type__": self.__typename__,
+      "__ref__": self.name,
+    }, [self])
+  
+  @classmethod
+  def decode(cls, obj: Serializable):
+    if not isinstance(obj, dict):
+      raise TypeError(f"expected dict, got {type(obj)}")
+    return TorchStateDictRef(name=obj["__ref__"])
+  
+  def write(self, dirname: str):
+    if self.logs is None:
+      raise ValueError(f"cannot write TrainingLogRef '{self.name}' with None array")
+    with open(os.path.join(dirname, self.name), mode='w', newline='') as f:
+      writer = csv.writer(f)
+      writer.writerows(self.logs)
+    
+  def read(self, dirname: str) -> Self:
+    with open(os.path.join(dirname, self.name), mode='r') as f:
+      reader = csv.reader(f)
+      self.logs = list(reader)
     return self
 
 # class Config(dataclass):
