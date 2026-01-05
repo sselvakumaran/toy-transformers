@@ -50,7 +50,7 @@ class TokenizedData:
 
 		return cls(
 			vocab=vocab,
-			data_tensor=obj["data"]
+			data_tensor=obj["data"].tensor
 		)
 
 ## EXAMPLE NEW FUNCTIONS

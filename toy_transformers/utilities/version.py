@@ -11,10 +11,15 @@ def get_git_version() -> str:
   except (subprocess.CalledProcessError, FileNotFoundError):
     return "unknown"
 
+def get_pytorch_version() -> str:
+  import torch
+  return torch.__version__
+
 def get_obj_metadata(
   obj,
   include_timestamp: bool = True,
   include_hash: bool = False,
+  include_pytorch_version: bool = False
 ):
   obj_type = type(obj)
   out = {
@@ -26,4 +31,6 @@ def get_obj_metadata(
     out["timestamp"] = datetime.now(timezone.utc).isoformat()
   if include_hash:
     out["hash"] = hash(obj)
+  if include_pytorch_version:
+    out["pytorch_version"] = get_pytorch_version()
   return out
