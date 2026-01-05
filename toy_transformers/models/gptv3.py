@@ -13,7 +13,7 @@ from typing import Dict, Literal
 # MoE + LoRA ability (maybe)
 
 @dataclass(frozen=True)
-class GPTv2Config:
+class GPTv3Config:
 	vocab_size: int
 	batch_size: int = 64 # how many samples to run in parallel
 	block_size: int = 128 # max context length
@@ -25,7 +25,7 @@ class GPTv2Config:
 	checkpoint: bool = False
 
 class CausalSelfAttention(nn.Module):
-	def __init__(self, config: GPTv2Config):
+	def __init__(self, config: GPTv3Config):
 		super().__init__()
 		self.n_heads, self.n_embed = config.n_heads, config.n_embed
 		if self.n_embed % self.n_heads != 0:
@@ -35,7 +35,7 @@ class CausalSelfAttention(nn.Module):
 		# note n_embed = n_heads * <some factor>
 		self.qkv_block = nn.Linear(self.n_embed, 3 * self.n_embed)
 		self.proj = nn.Linear(config.n_embed, config.n_embed)
-		self.proj.__INIT_SCALAR__ = (2 * config.n_layers) ** -0.5
+		self.proj._init_scale_refactor = (2 * config.n_layers) ** -0.5
 
 		self.proj_dp = nn.Dropout(config.dropout)
 		self.dropout = config.dropout
@@ -57,15 +57,15 @@ class CausalSelfAttention(nn.Module):
 
 
 class MultiLayerPerceptron(nn.Module):
-	def __init__(self, config: GPTv2Config):
+	def __init__(self, config: GPTv3Config):
 		super().__init__()
 		self.l1 = nn.Linear(config.n_embed, 4*config.n_embed)
 		self.gelu = nn.GELU(approximate='tanh')
 		self.proj = nn.Linear(4*config.n_embed, config.n_embed)
-		self.proj.__INIT_SCALAR__ = (2 * config.n_layers) ** -0.5
+		self.proj._init_scale_refactor = (2 * config.n_layers) ** -0.5
 		self.proj_dp = nn.Dropout(config.dropout)
 	
-	def forward(self, x: torch.Tensor, mode: Literal["train", "inference"] = "train"):
+	def forward(self, x: torch.Tensor):
 		x = self.l1(x)
 		x = self.gelu(x)
 		x = self.proj(x)
@@ -74,7 +74,7 @@ class MultiLayerPerceptron(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-	def __init__(self, config: GPTv2Config):
+	def __init__(self, config: GPTv3Config):
 		super().__init__()
 		self.norm1 = nn.RMSNorm(config.n_embed)
 		self.attn = CausalSelfAttention(config)
@@ -91,7 +91,7 @@ class TransformerBlock(nn.Module):
 	
 
 class LanguageModel(nn.Module):
-	def __init__(self, config: GPTv2Config):
+	def __init__(self, config: GPTv3Config):
 		super().__init__()
 		self.config = config
 		self.token_embed = nn.Embedding(config.vocab_size, config.n_embed)
@@ -106,7 +106,7 @@ class LanguageModel(nn.Module):
 
 		def _init_weights(module, base_std=0.02):
 			if isinstance(module, nn.Linear):
-				applied_std = base_std * (module.__INIT_SCALAR__ if hasattr(module, "__INIT_SCALAR__") else 1)
+				applied_std = base_std * (module._init_scale_refactor if hasattr(module, "_init_scale_refactor") else 1)
 				torch.nn.init.normal_(module.weight, mean=0.0, std=applied_std)
 				if module.bias is not None:
 					torch.nn.init.zeros_(module.bias)
@@ -117,7 +117,7 @@ class LanguageModel(nn.Module):
 
 		self.apply(_init_weights)
 	
-	def forward(self, idx: torch.tensor, targets=None):
+	def forward(self, idx: torch.Tensor, targets=None):
 		_, T = idx.size() # number of batches, token sequence
 		idx: torch.Tensor = idx.to(self.config.device) if T <= self.config.block_size else idx[:, -self.config.block_size:].to(self.config.device)
 
