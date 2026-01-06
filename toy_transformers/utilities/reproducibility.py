@@ -2,6 +2,7 @@ import torch
 import random
 import numpy as np
 from typing import Optional
+from toy_transformers.utilities.hashing import stable_hash
 
 def set_all_seeds(seed: int, deterministic: bool = True) -> None:
 	""" 
@@ -29,12 +30,13 @@ def set_all_seeds(seed: int, deterministic: bool = True) -> None:
 
 def worker_init_fn(worker_id: int, base_seed: Optional[int] = None) -> None:
 	"""
-	sets random seeds for DataLoader workers 
+	sets random seeds for DataLoader workers
 	"""
 	if base_seed is None:
 		worker_seed = torch.initial_seed() % 2**32
 	else:
-		H = hash("worker_init_fn")
+		# Use stable hash for consistent worker seeding across runs
+		H = int(stable_hash("worker_init_fn"), 16) & 0xFFFFFFFF  # Limit to 32-bit
 		worker_seed = (H + base_seed + worker_id) % 2**32
 
 	random.seed(worker_seed)

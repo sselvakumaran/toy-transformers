@@ -32,12 +32,12 @@ class TokenizedData:
 	def to_state_dict(self):
 		assert self.vocab is not None, "vocab must be stored to save"
 		return {
-			"metadata": get_obj_metadata(self, 
-				include_timestamp=False,
+			"metadata": get_obj_metadata(self,
+				include_timestamp = False,
 				include_hash = False
 			),
 			"mode": self.vocab.config.mode.value,
-			"vocab_hash": hash(self.vocab),
+			"vocab_hash": self.vocab.stable_hash_value(),
 			"data": TorchTensorRef("data", self.data)
 		}
 	
@@ -46,7 +46,7 @@ class TokenizedData:
 		vocab: Optional[tokenizer.Vocabulary] = None
 	):
 		if vocab:
-			assert hash(vocab) == obj["vocab_hash"], "vocab hash does not match"
+			assert vocab.stable_hash_value() == obj["vocab_hash"], "vocab hash does not match"
 
 		return cls(
 			vocab=vocab,

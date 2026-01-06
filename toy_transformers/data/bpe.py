@@ -10,6 +10,7 @@ import base64
 
 from toy_transformers.utilities import io
 from toy_transformers.utilities import version
+from toy_transformers.utilities.hashing import stable_hash
 from io import TextIOBase, BufferedIOBase, RawIOBase
 Token = str | bytes
 TokenSequence = str | bytes
@@ -136,10 +137,20 @@ class Vocabulary():
 		return out
 	
 	def __hash__(self):
+		"""
+		return int hash for default Python compatibility.
+		"""
+		
+		return int(self.stable_hash_value(), 16) & 0xFFFFFFFFFFFFFFFF  # Limit to 64-bit
+
+	def stable_hash_value(self) -> str:
+		"""
+		returns consistent hash between runs
+		"""
 		h = 0
 		for token in self.tokens:
-			h ^= hash(token)
-		return hash((self.config.mode.value, h))
+			h ^= stable_hash(token)
+		return stable_hash((self.config.mode.value, h))
 
 	def decode(self, idxs: List[int]):
 		return [self.tokens[idx] for idx in idxs]
