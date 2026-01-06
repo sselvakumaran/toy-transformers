@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Protocol, Tuple, TypeGuard, Union, runtime_checkable, Set, Self
 import os
 import json
@@ -8,9 +8,6 @@ import operator
 import csv
 
 flatten_list = lambda l: functools.reduce(operator.iconcat, l, [])
-
-# note: references must provide basename, write definition, and data
-# write definition requires basename, dirname, data
 
 # base serializable typing (stored in JSON)
 Serializable = Union[
@@ -225,40 +222,37 @@ class TrainingLogRef:
 			self.logs = list(reader)
 		return self
 
-# class Config(dataclass):
-#		vocab_size: int
-#		# ...
+@custom_serializable_type("MetricLogRef")
+@dataclass
+class MetricLogRef(SavableProtocol):
+	name: str
+	data: Dict[str, List[float]] = field(default_factory=dict)
 
-# class TokenDictionary(NamedTuple):
-#		token_set: List[int]
-#		idx_to_token: Dict[int, str]
-#		token_to_idx: Dict[str, int]
+	def __post_init__(self):
+		if not self.name.endswith('.json'):
+			self.name = f"{self.name}.json"
 
-#		def __save__(self):
-#			return { "token_list": self.token_set }
-	
-#		@staticmethod
-#		def __load__(state_dict: Dict[str, Any]):
-#			S = state_dict['token_set']
-#			idx_to_token = dict(enumerate(S))
-#			token_to_idx = dict([(x, i) for i, x in enumerate(S)])
-#			return TokenDictionary(
-#				token_set=state_dict['token_set'],
-#				idx_to_token=idx_to_token,
-#				token_to_idx=token_to_idx
-#			)
+	def log(self, **metrics):
+		for k, v in metrics.items():
+			if k not in self.data:
+				self.data[k] = []
+			self.data[k].append(float(v))
 
-# class ProcessedText():
-#		vocab_hash: str
-#		data: torch.Tensor # SAVE IN SEPARATE FILE
+	def encode(self) -> Tuple[dict, List[SavableProtocol]]:
+		return ({
+			"__type__": self.__typename__,
+			"__ref__": self.name,
+		}, [self])
 
-# class Model():
-#		vocab_hash: str
-#		config: Config
-#		state_dict: Dict[str, Any] # use torch.save, torch.load, torch.state_dict, ...
+	@classmethod
+	def decode(cls, obj: dict):
+		return cls(name=obj["__ref__"])
 
-# class TrainingRun():
-#		config: Config
-#		checkpoints: List[Tuple[int, Dict[str, Any]]]
-#		optimizer_state_dict: Dict[str, Any]
-#		training_loss: List[Tuple[int, int, int]]
+	def write(self, dirname: str):
+		with open(os.path.join(dirname, self.name), 'w') as f:
+			json.dump(self.data, f)
+
+	def read(self, dirname: str):
+		with open(os.path.join(dirname, self.name), 'r') as f:
+			self.data = json.load(f)
+		return self

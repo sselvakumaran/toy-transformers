@@ -14,31 +14,28 @@ from typing import Dict, Literal
 
 @dataclass(frozen=True)
 class GPTv3Config:
-	vocab_size: int
-	batch_size: int = 64 # how many samples to run in parallel
-	block_size: int = 128 # max context length
+	compatible_model_types: Literal['gpt-v3'] = 'gpt-v3'
 	n_heads: int = 8 # number of embedding heads (n_embed / n_heads MUST be an integer)
 	n_embed: int = 288 # number of dimensions in embedding vector
 	n_layers: int = 6 # number of blocks
 	dropout: float = 0.2 # number of nodes to randomly drop to reduce overfit
-	device: str = "mps"
 	checkpoint: bool = False
 
 class CausalSelfAttention(nn.Module):
-	def __init__(self, config: GPTv3Config):
+	def __init__(self, model_config: GPTv3Config):
 		super().__init__()
-		self.n_heads, self.n_embed = config.n_heads, config.n_embed
+		self.n_heads, self.n_embed = model_config.n_heads, model_config.n_embed
 		if self.n_embed % self.n_heads != 0:
 			raise ValueError("n_embed is not a multiple of n_heads")
 		# batch k,q,v into one linear block
 		# when doing forward pass, each head will be per batch
 		# note n_embed = n_heads * <some factor>
 		self.qkv_block = nn.Linear(self.n_embed, 3 * self.n_embed)
-		self.proj = nn.Linear(config.n_embed, config.n_embed)
-		self.proj._init_scale_refactor = (2 * config.n_layers) ** -0.5
+		self.proj = nn.Linear(model_config.n_embed, model_config.n_embed)
+		self.proj._init_scale_refactor = (2 * model_config.n_layers) ** -0.5
 
-		self.proj_dp = nn.Dropout(config.dropout)
-		self.dropout = config.dropout
+		self.proj_dp = nn.Dropout(model_config.dropout)
+		self.dropout = model_config.dropout
 	
 	def forward(self, x: torch.Tensor):
 		# get k,q,v linear block
@@ -57,13 +54,13 @@ class CausalSelfAttention(nn.Module):
 
 
 class MultiLayerPerceptron(nn.Module):
-	def __init__(self, config: GPTv3Config):
+	def __init__(self, model_config: GPTv3Config):
 		super().__init__()
-		self.l1 = nn.Linear(config.n_embed, 4*config.n_embed)
+		self.l1 = nn.Linear(model_config.n_embed, 4*model_config.n_embed)
 		self.gelu = nn.GELU(approximate='tanh')
-		self.proj = nn.Linear(4*config.n_embed, config.n_embed)
-		self.proj._init_scale_refactor = (2 * config.n_layers) ** -0.5
-		self.proj_dp = nn.Dropout(config.dropout)
+		self.proj = nn.Linear(4*model_config.n_embed, model_config.n_embed)
+		self.proj._init_scale_refactor = (2 * model_config.n_layers) ** -0.5
+		self.proj_dp = nn.Dropout(model_config.dropout)
 	
 	def forward(self, x: torch.Tensor):
 		x = self.l1(x)
@@ -74,12 +71,12 @@ class MultiLayerPerceptron(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-	def __init__(self, config: GPTv3Config):
+	def __init__(self, model_config: GPTv3Config):
 		super().__init__()
-		self.norm1 = nn.RMSNorm(config.n_embed)
-		self.attn = CausalSelfAttention(config)
-		self.norm2 = nn.RMSNorm(config.n_embed)
-		self.mlp = MultiLayerPerceptron(config)
+		self.norm1 = nn.RMSNorm(model_config.n_embed)
+		self.attn = CausalSelfAttention(model_config)
+		self.norm2 = nn.RMSNorm(model_config.n_embed)
+		self.mlp = MultiLayerPerceptron(model_config)
 	
 	def forward(self, x: torch.Tensor):
 		# residual connections
@@ -91,18 +88,34 @@ class TransformerBlock(nn.Module):
 	
 
 class LanguageModel(nn.Module):
-	def __init__(self, config: GPTv3Config):
+	model_type = 'gpt-v3'
+
+	def __init__(self, model_config: GPTv3Config, data_config):
+		"""Initialize GPT-v3 Language Model.
+
+		Args:
+			model_config: GPTv3Config with architecture parameters
+			data_config: DataConfig with vocab_size and block_size
+		"""
 		super().__init__()
-		self.config = config
-		self.token_embed = nn.Embedding(config.vocab_size, config.n_embed)
-		self.position_embed = nn.Embedding(config.block_size, config.n_embed)
-		self.dp = nn.Dropout(config.dropout)
-		self.blocks = nn.Sequential(*[TransformerBlock(config) for _ in range(config.n_layers)])
-		self.ln = nn.RMSNorm(config.n_embed)
-		self.head = nn.Linear(config.n_embed, config.vocab_size, bias=False)
+		# Import here to avoid circular dependency
+		from toy_transformers.training.configs import DataConfig
+
+		self.model_config = model_config
+		self.data_config = data_config
+
+		vocab_size = data_config.vocab_size
+		block_size = data_config.block_size
+
+		self.token_embed = nn.Embedding(vocab_size, model_config.n_embed)
+		self.position_embed = nn.Embedding(block_size, model_config.n_embed)
+		self.dp = nn.Dropout(model_config.dropout)
+		self.blocks = nn.Sequential(*[TransformerBlock(model_config) for _ in range(model_config.n_layers)])
+		self.ln = nn.RMSNorm(model_config.n_embed)
+		self.head = nn.Linear(model_config.n_embed, vocab_size, bias=False)
 		self.token_embed.weight = self.head.weight
 
-		self.register_buffer("pos", torch.arange(config.block_size).unsqueeze(0))
+		self.register_buffer("pos", torch.arange(block_size).unsqueeze(0))
 
 		def _init_weights(module, base_std=0.02):
 			if isinstance(module, nn.Linear):
@@ -119,13 +132,16 @@ class LanguageModel(nn.Module):
 	
 	def forward(self, idx: torch.Tensor, targets=None):
 		_, T = idx.size() # number of batches, token sequence
-		idx: torch.Tensor = idx.to(self.config.device) if T <= self.config.block_size else idx[:, -self.config.block_size:].to(self.config.device)
+		block_size = self.data_config.block_size
+
+		# Model is device-agnostic; tensor already on correct device
+		idx: torch.Tensor = idx if T <= block_size else idx[:, -block_size:]
 
 		pos_e = self.position_embed(self.pos[:, :T])
 		tok_e = self.token_embed(idx)
 		x = torch.add(pos_e, tok_e)
 		x = self.dp(x)
-		if self.config.checkpoint:
+		if self.model_config.checkpoint:
 			for block in self.blocks:
 				x = torch.utils.checkpoint.checkpoint(block, x)
 		else:
@@ -134,7 +150,7 @@ class LanguageModel(nn.Module):
 		if targets is None:
 			logits = self.head(x[:, [-1], :])
 			return logits, None
-		
+
 		logits = self.head(x)
 		loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
 		return logits, loss
@@ -163,14 +179,17 @@ class LanguageModel(nn.Module):
 
 	@torch.no_grad()
 	def generate(self, seed: torch.Tensor, max_new_tokens, temperature=1.0, topk=-1):
-		device = self.config.device
-		idx = seed.to(device)
+		device = seed.device  # Get device from input tensor
+		block_size = self.data_config.block_size
+		idx = seed
 		self.eval()
 		for _ in range(max_new_tokens):
-			idx_cond = idx[:, -self.config.block_size:]
+			idx_cond = idx[:, -block_size:]
 			_, T = idx_cond.shape
 			with torch.no_grad():
-				with torch.autocast(device_type=device, dtype=torch.bfloat16):
+				# Use device type from tensor
+				device_type = 'cuda' if device.type == 'cuda' else device.type
+				with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
 					logits, _ = self(idx_cond)
 				logits = logits[:, -1, :]
 				probs = F.softmax(logits / temperature, dim = -1)

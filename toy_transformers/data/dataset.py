@@ -1,6 +1,7 @@
 from torch.utils.data import Dataset, DataLoader
 import torch
 from typing import Optional
+from toy_transformers.utilities.hashing import stable_hash
 
 
 class TextDataset(Dataset):
@@ -116,19 +117,15 @@ def create_dataloader_for_epoch(
 	)
 
 
-def compute_dataset_hash(dataset) -> int:
+def compute_dataset_hash(dataset) -> str:
+	"""
+	returns consistent dataset hash between runs
+	note stable_hash handles large lists / tensors via sampling
+	"""
 	if hasattr(dataset, 'data'):
 		data_tensor = dataset.data
 	else:
 		data_tensor = dataset
-	shape_hash = hash(tuple(data_tensor.shape))
-	dtype_hash = hash(str(data_tensor.dtype))
-	n_samples = min(1000, len(data_tensor))
-	if len(data_tensor) > n_samples:
-		indices = torch.linspace(0, len(data_tensor) - 1, n_samples, dtype=torch.long)
-		samples = data_tensor[indices]
-	else:
-		samples = data_tensor
-	samples_hash = hash(tuple(samples.flatten().tolist()[:1000]))
 
-	return hash((shape_hash, dtype_hash, samples_hash))
+	# Use stable_hash which already handles tensor shape, dtype, and sampling
+	return stable_hash(data_tensor)
