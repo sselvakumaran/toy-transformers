@@ -1,4 +1,12 @@
 # TODO
+clean up this mess....
+
+
+
+old TODOs
+
+
+
 ## Model Architectures
 - GPTv2 (flash attention)
 - Deepseek (multi-headed latent attention)
