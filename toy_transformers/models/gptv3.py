@@ -4,14 +4,6 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Dict, Literal
 
-# TODO: deprecate, add changes to gptv2 then make offshoots:
-# RMSNorm
-# RoPE
-# SwiGLU
-# Checkpointing
-# Learned layer-scaling for attention blocks
-# MoE + LoRA ability (maybe)
-
 @dataclass(frozen=True)
 class GPTv3Config:
   compatible_model_types: Literal['gpt-v3'] = 'gpt-v3'
