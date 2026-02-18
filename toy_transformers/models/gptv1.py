@@ -10,10 +10,12 @@ import torch.nn.functional as F
 class GPTv1Config:
   vocab_size: int
   block_size: int # max context length
+  device: str = "mps"
   n_heads: int = 8 # number of embedding heads (n_embed / n_heads MUST be an integer)
   n_embed: int = 288 # number of dimensions in embedding vector
   n_layers: int = 6 # number of blocks
   dropout: float = 0.2 # number of nodes to randomly drop to reduce overfit
+
 
 class Head(nn.Module):
   def __init__(self, head_size: int, model_config: GPTv1Config, block_size: int):
@@ -26,7 +28,7 @@ class Head(nn.Module):
     self.dropout = nn.Dropout(dropout)
     # Create buffer on CPU, will be moved to correct device with model
     self.register_buffer('tril',
-      torch.tril(torch.ones(block_size, block_size))
+      torch.tril(torch.ones(block_size, block_size, device=model_config.device))
     )
     self.attention_scalar = pow(head_size, -0.5)
 
@@ -37,7 +39,7 @@ class Head(nn.Module):
     q = self.query(x)
 
     # doing attn. formula -> softmax(qK^T / sqrt(d_k)) * V
-    weights = torch.mul(q @ k.transpose(-2, -1), self.attention_scalar)
+    weights = q @ k.transpose(-2, -1) * self.attention_scalar
     weights = F.softmax(
       weights.masked_fill(self.tril[:T, :T] == 0, float('-inf')),
       dim=-1
@@ -96,20 +98,18 @@ class Block(nn.Module):
 
 
 class LanguageModel(nn.Module):
-  model_type = 'gpt-v1'
-
-  def __init__(self, model_config: GPTv1Config):
+  def __init__(self, config: GPTv1Config):
     super().__init__()
-    self.model_config = model_config
+    self.config = config
 
-    vocab_size = model_config.vocab_size
-    block_size = model_config.block_size
-    n_embed, n_layers = model_config.n_embed, model_config.n_layers
+    vocab_size = config.vocab_size
+    block_size = config.block_size
+    n_embed, n_layers = config.n_embed, config.n_layers
 
     self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
     self.position_embedding_table = nn.Embedding(block_size, n_embed)
     self.blocks = nn.Sequential(
-      *[Block(model_config, block_size) for _ in range(n_layers)],
+      *[Block(config, block_size) for _ in range(n_layers)],
       nn.LayerNorm(n_embed),
     )
     self.lm_head = nn.Linear(n_embed, vocab_size)
@@ -130,11 +130,11 @@ class LanguageModel(nn.Module):
 
   def forward(self, idx, targets=None):
     B, T = idx.shape
-    device = idx.device  # get device from input tensor
+    device = self.config.device
 
     tok_embed = self.token_embedding_table(idx)
     pos_embed = self.position_embedding_table(torch.arange(T, device=device))
-    x = self.blocks(tok_embed + pos_embed)
+    x = self.blocks(torch.add(tok_embed, pos_embed))
     logits = self.lm_head(x)
 
     if targets is None:
@@ -148,12 +148,12 @@ class LanguageModel(nn.Module):
 
   @torch.no_grad()
   def generate(self, idx, max_new_tokens):
-    block_size = self.model_config.block_size
+    block_size = self.config.block_size
     for _ in range(max_new_tokens):
       idx_cond = idx[:, -block_size:]
 
       _, T = idx_cond.shape
-      device = idx.device  # get device from input tensor
+      device = self.config.device  # get device from input tensor
       tok_embed = self.token_embedding_table(idx_cond)
       pos_embed = self.position_embedding_table(torch.arange(T, device=device))
       x = self.blocks(tok_embed + pos_embed)
