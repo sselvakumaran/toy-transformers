@@ -1,6 +1,9 @@
-# TODO
-clean up this mess....
-
+# things to fix while testing:
+- raw dataset really didn't have to exist (just takes up more data on disk)
+- this is INCREDIBLY messy. artifact_id inconsistent
+- best method:
+  - remove raw_dataset (just vocab, processed data, and training run)
+  - make common artifact type with metadata
 
 
 old TODOs
