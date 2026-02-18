@@ -98,6 +98,8 @@ class Block(nn.Module):
 
 
 class LanguageModel(nn.Module):
+  model_type: str = "gptv1"
+  
   def __init__(self, config: GPTv1Config):
     super().__init__()
     self.config = config

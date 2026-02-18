@@ -5,4 +5,4 @@
 /artifacts
 /.vscode
 **/.DS_Store
-experiments/*/artifacts/
+experiments/*/checkpoints/
