@@ -1,27 +1,29 @@
+# handles all tokenization stuff
+# has Vocabulary, ProcessedDataset
+# note: ProcessedDataset should have a create dataloader fn
+
+import base64
 from collections import Counter, defaultdict
-import heapq
-from typing import Dict, Iterator, List, Optional, Set, Tuple, Union, Pattern
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import cached_property
+import heapq
+import json
+from pathlib import Path
 import re
-import base64
-
-from toy_transformers.utilities import io
-from toy_transformers.artifacts import ArtifactType, ArtifactMetadata, stable_hash
-from io import TextIOBase, BufferedIOBase, RawIOBase
+from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
+from io import BufferedIOBase, RawIOBase, TextIOBase
 
 Token = str | bytes
 TokenSequence = str | bytes
 
 UNK = "<UNK>"
 ENCODING = 'utf-8'
-
 DEFAULT_PATTERN = r"|".join([
   r"'(?i:[sdmt]|ll|ve|re)", # contractions
   r"[^\r\n\w]?[^\W\d_]+", # space + letters
   r"\d{1,3}", # numbers
-  # r" ?[^\s\w]+[\r\n]*",# space + punctuation (slow)
+  # r" ?[^\s\w]+[\r\n]*", # space + punctuation (slow)
   # r"\s*[\r\n]+", # newlines (slow)
   r"\s+(?!\S)" # trailing whitespace
   r"\s+" # whitespace
@@ -41,13 +43,13 @@ class TokenizationMode(Enum):
 
 
 @dataclass
-class BPEConfig():
+class TokenizationConfig():
   mode: TokenizationMode
   vocab_size: int
   special_tokens_str: List[str]
   pattern_str: str
   special_tokens: Optional[List[Token]] = field(init=False, repr=False)
-  pattern: Optional[Pattern] = field(init=False, repr=False)
+  pattern: Optional[re.Pattern] = field(init=False, repr=False)
 
   def __post_init__(self):
     typed_pattern_str = self.pattern_str
@@ -59,7 +61,7 @@ class BPEConfig():
     if self.mode == TokenizationMode.BYTES:
       typed_special_tokens = [s.encode(ENCODING) for s in self.special_tokens_str]
     self.special_tokens = typed_special_tokens
-
+    
 
 class _Trie():
   @dataclass
@@ -114,19 +116,21 @@ class _Trie():
 
 @dataclass
 class Vocabulary():
-  config: BPEConfig
+  config: TokenizationConfig
   tokens: List[Token]
-  raw_dataset_id: Optional[str] = None
 
   @cached_property
   def token_to_idx(self) -> Dict[Token, int]:
     return {t: i for i, t in enumerate(self.tokens)}
-
+  
+  def __len__(self):
+    return len(self.tokens)
+  
   @cached_property
   def _trie(self) -> _Trie:
     return _Trie(self.config.mode, self.tokens)
-
-  def encode(self, text: TokenSequence):
+  
+  def encode(self, text: TokenSequence) -> List[int]:
     if not self.config.mode.match(text):
       raise ValueError(f"cannot use type f{type(text).__name__} on {self.mode}-based vocab")
     out = []
@@ -139,54 +143,55 @@ class Vocabulary():
       out.extend(addn)
     return out
 
-  def stable_hash(self) -> str:
-    h = 0
-    for token in self.tokens:
-      h ^= int(stable_hash(token), 16)
-    return stable_hash((self.config.mode.value, h))
-
-  def get_artifact_type(self) -> ArtifactType:
-    return ArtifactType.VOCABULARY
-
-  def decode(self, idxs: List[int]):
+  def decode(self, idxs: List[int]) -> List[Token]:
     return [self.tokens[idx] for idx in idxs]
+  
+  def save(self, path: str | Path):
+    path = Path(path)
+    if path.suffix != '.json':
+      path = path.with_suffix(".json")
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-  def to_state_dict(self) -> io.Savable:
-    content_hash = self.compute_content_hash()
-    metadata = ArtifactMetadata(self.get_artifact_type(), content_hash)
-
-    return {
-      "artifact_metadata": metadata.to_dict(),
+    is_bytes = self.config.mode == TokenizationMode.BYTES
+    serialized_tokens = \
+      [base64.b64encode(t).decode('ascii') for t in self.tokens] \
+      if is_bytes else self.tokens
+    
+    obj = {
       "config": {
         "mode": self.config.mode.value,
         "vocab_size": self.config.vocab_size,
         "special_tokens": self.config.special_tokens_str,
         "pattern": self.config.pattern_str
       },
-      "raw_dataset_id": self.raw_dataset_id,
-      "tokens": self.tokens if self.config.mode == TokenizationMode.STR else [
-        base64.b64encode(token).decode('ascii') for token in self.tokens
-      ]
+      "tokens": serialized_tokens
     }
 
+    with open(path, 'x') as f:
+      json.dump(obj, f, indent=4)
+
   @classmethod
-  def from_state_dict(cls, obj):
+  def load(cls, path: str | Path):
+    path = Path(path)
+    if path.suffix != '.json':
+      path = path.with_suffix(".json")
+    with open(path, 'r') as f:
+      obj = json.load(f)
+    
     cfg = obj["config"]
     mode = TokenizationMode(cfg["mode"])
-
-    raw_dataset_id = obj.get("raw_dataset_id")
-
+    tokens = \
+      [base64.b64decode(t) for t in obj["tokens"]] \
+      if mode == TokenizationMode.BYTES else obj["tokens"]
+    
     return cls(
-      BPEConfig(
+      config=TokenizationConfig(
         mode=mode,
-        vocab_size = cfg["vocab_size"],
+        vocab_size=cfg["vocab_size"],
         special_tokens_str=cfg["special_tokens"],
         pattern_str=cfg["pattern"]
       ),
-      obj["tokens"] if mode == TokenizationMode.STR else [
-        base64.b64decode(token) for token in obj["tokens"]
-      ],
-      raw_dataset_id=raw_dataset_id
+      tokens=tokens
     )
 
 
@@ -202,6 +207,7 @@ class _TokenMergeTracker():
     special_tokens: List[Token]
   ):
     special_tokens = sorted(special_tokens, key=len, reverse=True)
+    
     def to_atomic(word: TokenSequence) -> List[int]:
       tokens = []
       i = 0
@@ -259,7 +265,7 @@ class _TokenMergeTracker():
 
 def _stream_chunks(
   data_handle: Union[TextIOBase, BufferedIOBase],
-  pattern: Pattern,
+  pattern: re.Pattern,
   mode: TokenizationMode,
   chunk_size: int,
 ) -> Counter:
@@ -296,8 +302,7 @@ def create_bpe(
   mode: Optional[TokenizationMode] = TokenizationMode.STR,
   splitting_pattern: Optional[str] = DEFAULT_PATTERN,
   special_tokens: Optional[List[str]] = None,
-  read_chunk_size: int = 10_000_000,
-  raw_dataset_id: Optional[str] = None
+  read_chunk_size: int = 10_000_000
 ) -> Vocabulary:
   is_handle_binary = isinstance(data_handle, (RawIOBase, BufferedIOBase))
   if mode == TokenizationMode.BYTES:
@@ -306,7 +311,8 @@ def create_bpe(
   else:
     assert not is_handle_binary, \
       "training via text, but file was opened in binary mode"
-  config = BPEConfig(
+  
+  config = TokenizationConfig(
     mode, vocab_size, special_tokens or [],
     splitting_pattern
   )
@@ -352,4 +358,4 @@ def create_bpe(
           (-c, updated_pair)
         )
 
-  return Vocabulary(config, vocab, raw_dataset_id=raw_dataset_id)
+  return Vocabulary(config, vocab)

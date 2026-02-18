@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Literal
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,12 +8,12 @@ import torch.nn.functional as F
 
 @dataclass(frozen=True)
 class GPTv1Config:
-  compatible_model_types: Literal['gpt-v1'] = 'gpt-v1'
+  vocab_size: int
+  block_size: int # max context length
   n_heads: int = 8 # number of embedding heads (n_embed / n_heads MUST be an integer)
   n_embed: int = 288 # number of dimensions in embedding vector
   n_layers: int = 6 # number of blocks
   dropout: float = 0.2 # number of nodes to randomly drop to reduce overfit
-
 
 class Head(nn.Module):
   def __init__(self, head_size: int, model_config: GPTv1Config, block_size: int):
@@ -38,7 +37,7 @@ class Head(nn.Module):
     q = self.query(x)
 
     # doing attn. formula -> softmax(qK^T / sqrt(d_k)) * V
-    weights = q @ k.transpose(-2, -1) * self.attention_scalar
+    weights = torch.mul(q @ k.transpose(-2, -1), self.attention_scalar)
     weights = F.softmax(
       weights.masked_fill(self.tril[:T, :T] == 0, float('-inf')),
       dim=-1
@@ -99,13 +98,12 @@ class Block(nn.Module):
 class LanguageModel(nn.Module):
   model_type = 'gpt-v1'
 
-  def __init__(self, model_config: GPTv1Config, data_config):
+  def __init__(self, model_config: GPTv1Config):
     super().__init__()
     self.model_config = model_config
-    self.data_config = data_config
 
-    vocab_size = data_config.vocab_size
-    block_size = data_config.block_size
+    vocab_size = model_config.vocab_size
+    block_size = model_config.block_size
     n_embed, n_layers = model_config.n_embed, model_config.n_layers
 
     self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
@@ -150,7 +148,7 @@ class LanguageModel(nn.Module):
 
   @torch.no_grad()
   def generate(self, idx, max_new_tokens):
-    block_size = self.data_config.block_size
+    block_size = self.model_config.block_size
     for _ in range(max_new_tokens):
       idx_cond = idx[:, -block_size:]
 
@@ -166,14 +164,3 @@ class LanguageModel(nn.Module):
       idx_next = torch.multinomial(probs, num_samples = 1)
       idx = torch.cat((idx, idx_next), dim=1)
       yield idx_next
-
-
-# register model with registry
-from toy_transformers.models.registry import ModelRegistry
-
-ModelRegistry.register(
-  name='gpt-v1',
-  model_class=LanguageModel,
-  config_class=GPTv1Config,
-  description="GPT-v1 with manual multi-head attention and LayerNorm"
-)
