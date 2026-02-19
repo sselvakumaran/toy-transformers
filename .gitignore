@@ -1,5 +1,8 @@
 /venv
-/env_datasets
 /.cache
 /data
+/runs
 /artifacts
+/.vscode
+**/.DS_Store
+experiments/*/checkpoints/
