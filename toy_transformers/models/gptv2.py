@@ -5,7 +5,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # Version 2 - adding flash attention + some structural changes
-# TODO: add rmsnorm (since pretty much standard)
 
 @dataclass(frozen=True)
 class GPTv2Config:

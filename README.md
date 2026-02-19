@@ -1,43 +1,20 @@
-# things to fix while testing:
-- raw dataset really didn't have to exist (just takes up more data on disk)
-- this is INCREDIBLY messy. artifact_id inconsistent
-- best method:
-  - remove raw_dataset (just vocab, processed data, and training run)
-  - make common artifact type with metadata
-
-
-old TODOs
-
-
-
-## Model Architectures
-- GPTv2 (flash attention)
-- Deepseek (multi-headed latent attention)
-- gated linear attention
-- recurrent transformers
-- GPT v3 (transformer-XL caching memory, alibi)
-- perceiver
-## Model Additions
-- finetuning (LoRA / prefix tuning)
-- save/load model values
-- checkpointing
-## Utilities
-- C++ tokenizer
-- tokenization script
-  - get data and info, dump processed data + token info into files to use later
-## Repo Cleaning / Usability
-- clean up having data in repo (not needed)
-- easier interfaces to process text
-- make easier model switchout / dropin
-- ~~`<UNK>` should be built into tokenizer~~ (could be cleaner)
-- fix tokenization script name
-- tokenization should add checksum to verify correct token dictionary
-- add used pattern to stored token dictionary (since changes encoder)
-- tokenization argument defaults + file location defaults
-- fix "verbose"
-
-# LIST
-1. Tokenization script
-2. C++ tokenizer (if incredibly slow)
-3. GPTv3 with transformer-XL and alibi
-4. Deepseek
+## TODO
+- `gpt-v3`
+  - RMSNorm
+  - ReLU^2 activation
+  - QK-Norm
+  - Logit soft-capping
+- `gpt-v3-gqa`
+  - Grouped Query Attention
+  - simple, mostly to compare with MLA
+- `gpt-v3-mla`
+  - Multi-head Latent Attention (Deepseek)
+  - might need to remove RoPE? implementation is majorly different
+- `gpt-v3-moe`
+  - Mixture-of-Experts
+  - may need secondary loss to make sure routing is handled well
+- `gpt-v3-mtp`
+  - Multi-Token Prediction
+- `gpt-v3-swa`
+  - Sliding Window Attention
+  - mostly tocompare with nanoGPT speedrun
