@@ -2,10 +2,10 @@
 - [ ] `gpt-v3`: refined "baseline" model
   - [X] RMSNorm
   - [X] remove dropout
-  - [ ] RoPE
-  - [ ] ReLU^2 activation
-  - [ ] QK-Norm
-  - [ ] logit soft-capping
+  - [X] RoPE
+  - [X] ReLU^2 activation
+  - [X] ~~QK-Norm~~ (not added, unstable at this size)
+  - [X] logit soft-capping
 - [ ] `gpt-v3-gqa`: Grouped Query Attention
   - simple, mostly to compare with MLA
 - [ ] `gpt-v3-mla`: Multi-head Latent Attention (Deepseek)
