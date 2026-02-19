@@ -40,7 +40,7 @@ class CausalSelfAttention(nn.Module):
     q = q_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
     k = k_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
     v = v_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
-    y = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
+    y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
     y_joined = y.transpose(1, 2).contiguous().view(B, T, self.n_embed)
     y_proj = self.proj(y_joined)
     return y_proj
@@ -93,7 +93,6 @@ class LanguageModel(nn.Module):
     self.blocks = nn.Sequential(*[TransformerBlock(config) for _ in range(config.n_layers)])
     self.ln = nn.RMSNorm(config.n_embed)
     self.head = nn.Linear(config.n_embed, vocab_size, bias=False)
-    self.token_embed.weight = self.head.weight
 
     self.register_buffer("pos", torch.arange(block_size).unsqueeze(0))
 
@@ -110,7 +109,10 @@ class LanguageModel(nn.Module):
 
     self.apply(_init_weights)
 
-  def forward(self, idx: torch.tensor, targets=None):
+    # tie weights after init
+    self.token_embed.weight = self.head.weight
+
+  def forward(self, idx: torch.Tensor, targets=None):
     _, T = idx.size() # number of batches, token sequence
     block_size = self.config.block_size
 
