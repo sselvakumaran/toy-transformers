@@ -9,7 +9,9 @@ import torch.nn.functional as F
 
 @dataclass(frozen=True)
 class GPTv2Config:
-  compatible_model_types: Literal['gpt-v2'] = 'gpt-v2'
+  vocab_size: int
+  block_size: int
+  device: str = "cpu"
   n_heads: int = 8 # number of embedding heads (n_embed / n_heads MUST be an integer)
   n_embed: int = 288 # number of dimensions in embedding vector
   n_layers: int = 6 # number of blocks
@@ -18,20 +20,20 @@ class GPTv2Config:
 
 
 class CausalSelfAttention(nn.Module):
-  def __init__(self, model_config: GPTv2Config):
+  def __init__(self, config: GPTv2Config):
     super().__init__()
-    self.n_heads, self.n_embed = model_config.n_heads, model_config.n_embed
+    self.n_heads, self.n_embed = config.n_heads, config.n_embed
     if self.n_embed % self.n_heads != 0:
       raise ValueError("n_embed is not a multiple of n_heads")
     # batch k,q,v into one linear block
     # when doing forward pass, each head will be per batch
     # note n_embed = n_heads * <some factor>
     self.qkv_block = nn.Linear(self.n_embed, 3 * self.n_embed)
-    self.proj = nn.Linear(model_config.n_embed, model_config.n_embed)
-    self.proj.__INIT_SCALAR__ = (2 * model_config.n_layers) ** -0.5
+    self.proj = nn.Linear(config.n_embed, config.n_embed)
+    self.proj.__INIT_SCALAR__ = (2 * config.n_layers) ** -0.5
 
-    self.proj_dp = nn.Dropout(model_config.dropout)
-    self.dropout = model_config.dropout
+    self.proj_dp = nn.Dropout(config.dropout)
+    self.dropout = config.dropout
 
   def forward(self, x: torch.Tensor):
     # get k,q,v linear block
@@ -50,15 +52,15 @@ class CausalSelfAttention(nn.Module):
 
 
 class MultiLayerPerceptron(nn.Module):
-  def __init__(self, model_config: GPTv2Config):
+  def __init__(self, config: GPTv2Config):
     super().__init__()
-    self.l1 = nn.Linear(model_config.n_embed, 4*model_config.n_embed)
+    self.l1 = nn.Linear(config.n_embed, 4*config.n_embed)
     self.gelu = nn.GELU(approximate='tanh')
-    self.proj = nn.Linear(4*model_config.n_embed, model_config.n_embed)
-    self.proj.__INIT_SCALAR__ = (2 * model_config.n_layers) ** -0.5
-    self.proj_dp = nn.Dropout(model_config.dropout)
+    self.proj = nn.Linear(4*config.n_embed, config.n_embed)
+    self.proj.__INIT_SCALAR__ = (2 * config.n_layers) ** -0.5
+    self.proj_dp = nn.Dropout(config.dropout)
 
-  def forward(self, x: torch.Tensor, mode: Literal["train", "inference"] = "train"):
+  def forward(self, x: torch.Tensor):
     x = self.l1(x)
     x = self.gelu(x)
     x = self.proj(x)
@@ -67,12 +69,12 @@ class MultiLayerPerceptron(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-  def __init__(self, model_config: GPTv2Config):
+  def __init__(self, config: GPTv2Config):
     super().__init__()
-    self.norm1 = nn.LayerNorm(model_config.n_embed)
-    self.attn = CausalSelfAttention(model_config)
-    self.norm2 = nn.LayerNorm(model_config.n_embed)
-    self.mlp = MultiLayerPerceptron(model_config)
+    self.norm1 = nn.LayerNorm(config.n_embed)
+    self.attn = CausalSelfAttention(config)
+    self.norm2 = nn.LayerNorm(config.n_embed)
+    self.mlp = MultiLayerPerceptron(config)
 
   def forward(self, x: torch.Tensor):
     # residual connections
@@ -84,22 +86,21 @@ class TransformerBlock(nn.Module):
 
 
 class LanguageModel(nn.Module):
-  model_type = 'gpt-v2'
+  model_type: str = 'gpt-v2'
 
-  def __init__(self, model_config: GPTv2Config, data_config):
+  def __init__(self, config: GPTv2Config):
     super().__init__()
-    self.model_config = model_config
-    self.data_config = data_config
+    self.config = config
 
-    vocab_size = data_config.vocab_size
-    block_size = data_config.block_size
+    vocab_size = config.vocab_size
+    block_size = config.block_size
 
-    self.token_embed = nn.Embedding(vocab_size, model_config.n_embed)
-    self.position_embed = nn.Embedding(block_size, model_config.n_embed)
-    self.dp = nn.Dropout(model_config.dropout)
-    self.blocks = nn.Sequential(*[TransformerBlock(model_config) for _ in range(model_config.n_layers)])
-    self.ln = nn.LayerNorm(model_config.n_embed)
-    self.head = nn.Linear(model_config.n_embed, vocab_size, bias=False)
+    self.token_embed = nn.Embedding(vocab_size, config.n_embed)
+    self.position_embed = nn.Embedding(block_size, config.n_embed)
+    self.dp = nn.Dropout(config.dropout)
+    self.blocks = nn.Sequential(*[TransformerBlock(config) for _ in range(config.n_layers)])
+    self.ln = nn.LayerNorm(config.n_embed)
+    self.head = nn.Linear(config.n_embed, vocab_size, bias=False)
     self.token_embed.weight = self.head.weight
 
     self.register_buffer("pos", torch.arange(block_size).unsqueeze(0))
@@ -120,7 +121,7 @@ class LanguageModel(nn.Module):
 
   def forward(self, idx: torch.tensor, targets=None):
     _, T = idx.size() # number of batches, token sequence
-    block_size = self.data_config.block_size
+    block_size = self.config.block_size
 
     idx: torch.Tensor = idx if T <= block_size else idx[:, -block_size:]
 
@@ -128,7 +129,7 @@ class LanguageModel(nn.Module):
     tok_e = self.token_embed(idx)
     x = torch.add(pos_e, tok_e)
     x = self.dp(x)
-    if self.model_config.checkpoint:
+    if self.config.checkpoint:
       for block in self.blocks:
         x = torch.utils.checkpoint.checkpoint(block, x)
     else:
@@ -167,7 +168,7 @@ class LanguageModel(nn.Module):
   @torch.no_grad()
   def generate(self, seed: torch.Tensor, max_new_tokens, temperature=1.0, topk=-1):
     device = seed.device  # get device from input tensor
-    block_size = self.data_config.block_size
+    block_size = self.config.block_size
     idx = seed
     self.eval()
     for _ in range(max_new_tokens):
@@ -188,14 +189,3 @@ class LanguageModel(nn.Module):
         idx = torch.cat((idx, xcol), dim=1)
         yield xcol
     self.train()
-
-
-# register model with registry
-from toy_transformers.models.registry import ModelRegistry
-
-ModelRegistry.register(
-  name='gpt-v2',
-  model_class=LanguageModel,
-  config_class=GPTv2Config,
-  description="GPT-v2 with flash attention, batched QKV, and GELU activation"
-)
