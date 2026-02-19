@@ -1,26 +1,19 @@
 ## TODO
-- `gpt-v3`
-  - Refined "Baseline" model
-  - RMSNorm
-  - RoPE
-  - ReLU^2 activation
-  - QK-Norm
-  - Logit soft-capping
-- `gpt-v3-gqa`
-  - Grouped Query Attention
+- [ ] `gpt-v3`: refined "baseline" model
+  - [X] RMSNorm
+  - [X] remove dropout
+  - [ ] RoPE
+  - [ ] ReLU^2 activation
+  - [ ] QK-Norm
+  - [ ] logit soft-capping
+- [ ] `gpt-v3-gqa`: Grouped Query Attention
   - simple, mostly to compare with MLA
-- `gpt-v3-mla`
-  - Multi-head Latent Attention (Deepseek)
+- [ ] `gpt-v3-mla`: Multi-head Latent Attention (Deepseek)
   - might need to remove RoPE? implementation is majorly different
-- `gpt-v3-moe`
-  - Mixture-of-Experts
+- [ ] `gpt-v3-moe`: Mixture-of-Experts
   - may need secondary loss to make sure routing is handled well
-- `gpt-v3-mtp`
-  - Multi-Token Prediction
-- `gpt-v3-swa`
-  - Sliding Window Attention
+- [ ] `gpt-v3-mtp`: Multi-Token Prediction
+- [ ] `gpt-v3-swa`: Sliding Window Attention
   - mostly tocompare with nanoGPT speedrun
-- `gpt-v3-swiglu`
-  - use SwiGLU instead of ReLU^2
-- `gpt-v3-gelu`
-  - use GELU instead of ReLU^2
+- [ ] `gpt-v3-swiglu`: SwiGLU activation
+- [ ] `gpt-v3-gelu` GELU activation

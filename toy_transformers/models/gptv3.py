@@ -4,10 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Version 3 - adding...
-# RMSNorm - ADDED
-# RoPE - TO-DO
-# modded-gpt changes - TO RESEARCH
+# Version 3 - RMSNorm, RoPE, ReLU^2, QK-Norm, logit soft-capping
 
 @dataclass(frozen=True)
 class GPTv3Config:
@@ -17,7 +14,6 @@ class GPTv3Config:
   n_heads: int = 8 # number of embedding heads (n_embed / n_heads MUST be an integer)
   n_embed: int = 288 # number of dimensions in embedding vector
   n_layers: int = 6 # number of blocks
-  dropout: float = 0.2 # number of nodes to randomly drop to reduce overfit
   checkpoint: bool = False
 
 
@@ -34,9 +30,6 @@ class CausalSelfAttention(nn.Module):
     self.proj = nn.Linear(config.n_embed, config.n_embed)
     self.proj.__INIT_SCALAR__ = (2 * config.n_layers) ** -0.5
 
-    self.proj_dp = nn.Dropout(config.dropout)
-    self.dropout = config.dropout
-
   def forward(self, x: torch.Tensor):
     # get k,q,v linear block
     B, T, _ = x.size() # assuming C == self.n_embed
@@ -49,7 +42,7 @@ class CausalSelfAttention(nn.Module):
     v = v_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
     y = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
     y_joined = y.transpose(1, 2).contiguous().view(B, T, self.n_embed)
-    y_proj = self.proj_dp(self.proj(y_joined))
+    y_proj = self.proj(y_joined)
     return y_proj
 
 
@@ -60,13 +53,11 @@ class MultiLayerPerceptron(nn.Module):
     self.gelu = nn.GELU(approximate='tanh')
     self.proj = nn.Linear(4*config.n_embed, config.n_embed)
     self.proj.__INIT_SCALAR__ = (2 * config.n_layers) ** -0.5
-    self.proj_dp = nn.Dropout(config.dropout)
 
   def forward(self, x: torch.Tensor):
     x = self.l1(x)
     x = self.gelu(x)
     x = self.proj(x)
-    x = self.proj_dp(x)
     return x
 
 
@@ -99,7 +90,6 @@ class LanguageModel(nn.Module):
 
     self.token_embed = nn.Embedding(vocab_size, config.n_embed)
     self.position_embed = nn.Embedding(block_size, config.n_embed)
-    self.dp = nn.Dropout(config.dropout)
     self.blocks = nn.Sequential(*[TransformerBlock(config) for _ in range(config.n_layers)])
     self.ln = nn.RMSNorm(config.n_embed)
     self.head = nn.Linear(config.n_embed, vocab_size, bias=False)
@@ -129,7 +119,6 @@ class LanguageModel(nn.Module):
     pos_e = self.position_embed(self.pos[:, :T])
     tok_e = self.token_embed(idx)
     x = torch.add(pos_e, tok_e)
-    x = self.dp(x)
     if self.config.checkpoint:
       for block in self.blocks:
         x = torch.utils.checkpoint.checkpoint(block, x)
@@ -174,7 +163,6 @@ class LanguageModel(nn.Module):
     self.eval()
     for _ in range(max_new_tokens):
       idx_cond = idx[:, -block_size:]
-      _, T = idx_cond.shape
       with torch.no_grad():
         device_type = device.type
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
