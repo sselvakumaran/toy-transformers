@@ -14,21 +14,53 @@ class GPTv3Config:
   n_heads: int = 8 # number of embedding heads (n_embed / n_heads MUST be an integer)
   n_embed: int = 288 # number of dimensions in embedding vector
   n_layers: int = 6 # number of blocks
+  rope_base: float = 10000.0
   checkpoint: bool = False
+
+
+class RotaryPositionalEmbedding(nn.Module):
+  def __init__(self, config: GPTv3Config):
+    super().__init__()
+    head_dim = config.n_embed // config.n_heads
+    max_seq_len = config.block_size
+    base = config.rope_base
+
+    assert head_dim % 2 == 0
+    # frequencies
+    thetas = torch.pow(base, -torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)
+    # positions
+    t = torch.arange(max_seq_len, dtype=torch.float32)
+    angles = torch.outer(t, thetas)
+
+    freqs_cis = torch.polar(torch.ones_like(angles), angles)
+    self.register_buffer("freqs_cis", freqs_cis)
+
+  def forward(self, q: torch.Tensor, k: torch.Tensor):
+    # q, k ~ (B, n_heads, T, head_dim)
+    _, _, T, _ = q.shape
+    freqs = self.freqs_cis[:T].view(1, 1, T, -1)
+
+    q_complex = torch.view_as_complex(q.float().reshape(*q.shape[:-1], -1, 2))
+    k_complex = torch.view_as_complex(k.float().reshape(*k.shape[:-1], -1, 2))
+
+    q_rotated = torch.view_as_real(q_complex * freqs).flatten(-2)
+    k_rotated = torch.view_as_real(k_complex * freqs).flatten(-2)
+
+    return q_rotated.type_as(q), k_rotated.type_as(k)
 
 
 class CausalSelfAttention(nn.Module):
   def __init__(self, config: GPTv3Config):
     super().__init__()
     self.n_heads, self.n_embed = config.n_heads, config.n_embed
-    if self.n_embed % self.n_heads != 0:
-      raise ValueError("n_embed is not a multiple of n_heads")
+    assert self.n_embed % self.n_heads == 0
     # batch k,q,v into one linear block
     # when doing forward pass, each head will be per batch
     # note n_embed = n_heads * <some factor>
     self.qkv_block = nn.Linear(self.n_embed, 3 * self.n_embed)
     self.proj = nn.Linear(config.n_embed, config.n_embed)
     self.proj.__INIT_SCALAR__ = (2 * config.n_layers) ** -0.5
+    self.rope = RotaryPositionalEmbedding(config=config)
 
   def forward(self, x: torch.Tensor):
     # get k,q,v linear block
@@ -40,10 +72,12 @@ class CausalSelfAttention(nn.Module):
     q = q_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
     k = k_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
     v = v_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
+
+    q, k = self.rope(q, k)
+
     y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
     y_joined = y.transpose(1, 2).contiguous().view(B, T, self.n_embed)
-    y_proj = self.proj(y_joined)
-    return y_proj
+    return self.proj(y_joined)
 
 
 class MultiLayerPerceptron(nn.Module):
@@ -86,15 +120,11 @@ class LanguageModel(nn.Module):
     self.config = config
 
     vocab_size = config.vocab_size
-    block_size = config.block_size
 
     self.token_embed = nn.Embedding(vocab_size, config.n_embed)
-    self.position_embed = nn.Embedding(block_size, config.n_embed)
     self.blocks = nn.Sequential(*[TransformerBlock(config) for _ in range(config.n_layers)])
     self.ln = nn.RMSNorm(config.n_embed)
     self.head = nn.Linear(config.n_embed, vocab_size, bias=False)
-
-    self.register_buffer("pos", torch.arange(block_size).unsqueeze(0))
 
     def _init_weights(module, base_std=0.02):
       if isinstance(module, nn.Linear):
@@ -108,7 +138,6 @@ class LanguageModel(nn.Module):
         torch.nn.init.ones_(module.weight)
 
     self.apply(_init_weights)
-
     # tie weights after init
     self.token_embed.weight = self.head.weight
 
@@ -118,9 +147,8 @@ class LanguageModel(nn.Module):
 
     idx: torch.Tensor = idx if T <= block_size else idx[:, -block_size:]
 
-    pos_e = self.position_embed(self.pos[:, :T])
     tok_e = self.token_embed(idx)
-    x = torch.add(pos_e, tok_e)
+    x = tok_e
     if self.config.checkpoint:
       for block in self.blocks:
         x = torch.utils.checkpoint.checkpoint(block, x)
