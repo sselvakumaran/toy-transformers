@@ -1,6 +1,8 @@
 ## TODO
 - `gpt-v3`
+  - Refined "Baseline" model
   - RMSNorm
+  - RoPE
   - ReLU^2 activation
   - QK-Norm
   - Logit soft-capping
@@ -18,3 +20,7 @@
 - `gpt-v3-swa`
   - Sliding Window Attention
   - mostly tocompare with nanoGPT speedrun
+- `gpt-v3-swiglu`
+  - use SwiGLU instead of ReLU^2
+- `gpt-v3-gelu`
+  - use GELU instead of ReLU^2
