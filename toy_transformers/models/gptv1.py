@@ -10,7 +10,7 @@ import torch.nn.functional as F
 class GPTv1Config:
   vocab_size: int
   block_size: int # max context length
-  device: str = "mps"
+  device: str = "cpu"
   n_heads: int = 8 # number of embedding heads (n_embed / n_heads MUST be an integer)
   n_embed: int = 288 # number of dimensions in embedding vector
   n_layers: int = 6 # number of blocks
@@ -18,9 +18,9 @@ class GPTv1Config:
 
 
 class Head(nn.Module):
-  def __init__(self, head_size: int, model_config: GPTv1Config, block_size: int):
+  def __init__(self, head_size: int, config: GPTv1Config, block_size: int):
     super().__init__()
-    n_embed, dropout = model_config.n_embed, model_config.dropout
+    n_embed, dropout = config.n_embed, config.dropout
 
     self.key = nn.Linear(n_embed, head_size, bias=False)
     self.query = nn.Linear(n_embed, head_size, bias=False)
@@ -28,7 +28,7 @@ class Head(nn.Module):
     self.dropout = nn.Dropout(dropout)
     # Create buffer on CPU, will be moved to correct device with model
     self.register_buffer('tril',
-      torch.tril(torch.ones(block_size, block_size, device=model_config.device))
+      torch.tril(torch.ones(block_size, block_size, device=config.device))
     )
     self.attention_scalar = pow(head_size, -0.5)
 
@@ -50,11 +50,11 @@ class Head(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
-  def __init__(self, head_size, model_config: GPTv1Config, block_size: int):
+  def __init__(self, head_size: int, config: GPTv1Config, block_size: int):
     super().__init__()
-    n_embed, dropout, num_heads = model_config.n_embed, model_config.dropout, model_config.n_heads
+    n_embed, dropout, num_heads = config.n_embed, config.dropout, config.n_heads
 
-    self.heads = nn.ModuleList([Head(head_size, model_config, block_size) for _ in range(num_heads)])
+    self.heads = nn.ModuleList([Head(head_size, config, block_size) for _ in range(num_heads)])
     self.proj = nn.Linear(n_embed, n_embed)
     self.dropout = nn.Dropout(dropout)
 
@@ -65,9 +65,9 @@ class MultiHeadAttention(nn.Module):
 
 
 class FeedForward(nn.Module):
-  def __init__(self, model_config: GPTv1Config):
+  def __init__(self, config: GPTv1Config):
     super().__init__()
-    n_embed, dropout = model_config.n_embed, model_config.dropout
+    n_embed, dropout = config.n_embed, config.dropout
 
     self.net = nn.Sequential(
       nn.Linear(n_embed, 4 * n_embed),
@@ -98,8 +98,8 @@ class Block(nn.Module):
 
 
 class LanguageModel(nn.Module):
-  model_type: str = "gptv1"
-  
+  model_type: str = "gpt-v1"
+
   def __init__(self, config: GPTv1Config):
     super().__init__()
     self.config = config
