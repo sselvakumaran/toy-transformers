@@ -15,6 +15,7 @@ class GPTv3Config:
   n_embed: int = 288 # number of dimensions in embedding vector
   n_layers: int = 6 # number of blocks
   rope_base: float = 10000.0
+  logit_cap: float = 30.0
   checkpoint: bool = False
 
 
@@ -71,9 +72,9 @@ class CausalSelfAttention(nn.Module):
     # view must be (B, n_heads, T, n_head_embed) needed for scaled_dot_product_attention
     q = q_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
     k = k_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
-    v = v_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
 
     q, k = self.rope(q, k)
+    v = v_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
 
     y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
     y_joined = y.transpose(1, 2).contiguous().view(B, T, self.n_embed)
@@ -84,13 +85,12 @@ class MultiLayerPerceptron(nn.Module):
   def __init__(self, config: GPTv3Config):
     super().__init__()
     self.l1 = nn.Linear(config.n_embed, 4*config.n_embed)
-    self.gelu = nn.GELU(approximate='tanh')
     self.proj = nn.Linear(4*config.n_embed, config.n_embed)
     self.proj.__INIT_SCALAR__ = (2 * config.n_layers) ** -0.5
 
   def forward(self, x: torch.Tensor):
     x = self.l1(x)
-    x = self.gelu(x)
+    x = F.relu(x).square()
     x = self.proj(x)
     return x
 
@@ -155,11 +155,12 @@ class LanguageModel(nn.Module):
     else:
       x = self.blocks(x)
     x = self.ln(x)
-    if targets is None:
-      logits = self.head(x[:, [-1], :])
-      return logits, None
-
+    
+    if targets is None: x = x[:, [-1], :]
     logits = self.head(x)
+    logits = self.config.logit_cap * torch.tanh(logits / self.config.logit_cap)
+
+    if targets is None: return logits, None
     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
     return logits, loss
 
@@ -193,18 +194,21 @@ class LanguageModel(nn.Module):
     self.eval()
     for _ in range(max_new_tokens):
       idx_cond = idx[:, -block_size:]
-      with torch.no_grad():
-        device_type = device.type
-        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-          logits, _ = self(idx_cond)
-        logits = logits[:, -1, :]
-        probs = F.softmax(logits / temperature, dim = -1)
-        if topk <= 0:
-          xcol = torch.multinomial(probs, num_samples = 1)
-        else:
-          top_p, top_i = torch.topk(probs, topk, dim=-1)
-          ix = torch.multinomial(top_p, num_samples=1)
-          xcol = torch.gather(top_i, -1, ix)
-        idx = torch.cat((idx, xcol), dim=1)
-        yield xcol
+      device_type = device.type
+      with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        logits, _ = self(idx_cond)
+      logits = logits[:, -1, :].float()
+      probs = F.softmax(logits / temperature, dim = -1)
+      if torch.isnan(probs).any() or torch.isinf(probs).any():
+        print(f"logits range: [{logits.min():.2f}, {logits.max():.2f}]")
+        print(f"probs has nan: {torch.isnan(probs).any()}, inf: {torch.isinf(probs).any()}")
+        break
+      if topk <= 0:
+        xcol = torch.multinomial(probs, num_samples = 1)
+      else:
+        top_p, top_i = torch.topk(probs, topk, dim=-1)
+        ix = torch.multinomial(top_p, num_samples=1)
+        xcol = torch.gather(top_i, -1, ix)
+      idx = torch.cat((idx, xcol), dim=1)
+      yield xcol
     self.train()
