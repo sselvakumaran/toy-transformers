@@ -11,7 +11,7 @@ import heapq
 import json
 from pathlib import Path
 import re
-from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 from io import BufferedIOBase, RawIOBase, TextIOBase
 
 Token = str | bytes
@@ -23,9 +23,9 @@ DEFAULT_PATTERN = r"|".join([
   r"'(?i:[sdmt]|ll|ve|re)", # contractions
   r"[^\r\n\w]?[^\W\d_]+", # space + letters
   r"\d{1,3}", # numbers
-  # r" ?[^\s\w]+[\r\n]*", # space + punctuation (slow)
+  r" ?[^\s\w]+[\r\n]*", # space + punctuation (slow)
   # r"\s*[\r\n]+", # newlines (slow)
-  r"\s+(?!\S)" # trailing whitespace
+  r"\s+(?!\S)", # trailing whitespace
   r"\s+" # whitespace
 ])
 
@@ -61,63 +61,13 @@ class TokenizationConfig():
     if self.mode == TokenizationMode.BYTES:
       typed_special_tokens = [s.encode(ENCODING) for s in self.special_tokens_str]
     self.special_tokens = typed_special_tokens
-    
-
-class _Trie():
-  @dataclass
-  class _TrieNode():
-    children: Dict[Token, '_Trie._TrieNode'] = field(default_factory=dict)
-    is_token: bool = False
-
-  def __init__(self,
-    mode: TokenizationMode,
-    tokens: Optional[TokenSequence] = None
-  ):
-    self.root = _Trie._TrieNode()
-    self.mode = mode
-    if not tokens: return
-
-    for token in tokens:
-      self.insert(token)
-
-  def insert(self, token: Token):
-    node = self.root
-    for c in token:
-      if c not in node.children:
-        node.children[c] = _Trie._TrieNode()
-      node = node.children[c]
-    node.is_token = True
-
-  def _match_longest(self, text: TokenSequence, start: int) -> Token:
-    node = self.root
-    temp = "" if self.mode == TokenizationMode.STR else b""
-    out = None
-    for i in range(start, len(text)):
-      c = text[i]
-      if c in node.children:
-        node = node.children[c]
-        temp += c
-        if node.is_token:
-          out = temp
-      else: break
-    if out is None:
-      return UNK, i + 1
-    return out, start + len(out)
-
-  def tokenize(self, s: TokenSequence):
-    tokens = []
-    i = 0
-    while i < len(s):
-      tok, j = self._match_longest(s, i)
-      tokens.append(tok)
-      i = j
-    return tokens
 
 
 @dataclass
 class Vocabulary():
   config: TokenizationConfig
   tokens: List[Token]
+  merges: Dict[int, Tuple[int, int]]
 
   @cached_property
   def token_to_idx(self) -> Dict[Token, int]:
@@ -127,20 +77,41 @@ class Vocabulary():
     return len(self.tokens)
   
   @cached_property
-  def _trie(self) -> _Trie:
-    return _Trie(self.config.mode, self.tokens)
+  def _pair_to_rank(self) -> Dict[Tuple[int, int], int]:
+    return {pair: idx for idx, pair in self.merges.items()}
   
   def encode(self, text: TokenSequence) -> List[int]:
     if not self.config.mode.match(text):
       raise ValueError(f"cannot use type f{type(text).__name__} on {self.mode}-based vocab")
+    
     out = []
-    iter: Iterator[re.Match] = re.finditer(self.config.pattern, text)
-    for match in iter:
-      chunk = match.group(0)
-      addn = []
-      for tok in self._trie.tokenize(chunk):
-        addn.append(self.token_to_idx[tok])
-      out.extend(addn)
+    pair_to_rank: dict = self._pair_to_rank
+    cache = {}
+
+    for m in re.finditer(self.config.pattern, text):
+      chunk = m.group(0)
+      if chunk in cache:
+        out.extend(cache[chunk])
+        continue
+
+      tokens = [self.token_to_idx[chunk[i:i+1]] for i in range(len(chunk))]
+      INF = float('inf')
+
+      while len(tokens) >= 2:
+        best_rank, best_pair, best_idx = INF, None, -1
+
+        for i in range(len(tokens) - 1):
+          pair = (tokens[i], tokens[i+1])
+          rank = pair_to_rank.get(pair, INF)
+          if rank < best_rank:
+            best_rank, best_pair, best_idx = rank, pair, i
+
+        if best_pair is None: break
+        tokens[best_idx] = best_rank
+        tokens.pop(best_idx + 1)
+
+      cache[chunk] = tokens
+      out.extend(tokens)
     return out
 
   def decode(self, idxs: List[int]) -> List[Token]:
@@ -164,7 +135,8 @@ class Vocabulary():
         "special_tokens": self.config.special_tokens_str,
         "pattern": self.config.pattern_str
       },
-      "tokens": serialized_tokens
+      "tokens": serialized_tokens,
+      "merges": self.merges
     }
 
     with open(path, 'x') as f:
@@ -191,7 +163,8 @@ class Vocabulary():
         special_tokens_str=cfg["special_tokens"],
         pattern_str=cfg["pattern"]
       ),
-      tokens=tokens
+      tokens=tokens,
+      merges={int(k): tuple(v) for k, v in obj["merges"].items()}
     )
 
 
@@ -217,7 +190,7 @@ class _TokenMergeTracker():
             tokens.append(token_to_idx[tok])
             i += len(tok)
             break
-        else: # no breaks
+        else:
           tokens.append(token_to_idx[word[i:i+1]])
           i += 1
       return tokens
@@ -246,20 +219,31 @@ class _TokenMergeTracker():
         if tokens[i] == t1 and tokens[i+1] == t2:
           if i > 0:
             old_pair, new_pair = (tokens[i-1], t1), (tokens[i-1], t3)
+
             self.pair_counts[old_pair] -= count
+            if self.pair_counts[old_pair] <= 0:
+              del self.pair_counts[old_pair]
+              self.pair_to_words.pop(old_pair, None)
+            
             self.pair_counts[new_pair] += count
             self.pair_to_words[new_pair].add(word_idx)
             updated.add(new_pair)
+          
           if i + 2 < len(tokens):
             old_pair, new_pair = (t2, tokens[i+2]), (t3, tokens[i+2])
+
             self.pair_counts[old_pair] -= count
+            if self.pair_counts[old_pair] <= 0:
+              del self.pair_counts[old_pair]
+              self.pair_to_words.pop(old_pair, None)
+
             self.pair_counts[new_pair] += count
             self.pair_to_words[new_pair].add(word_idx)
             updated.add(new_pair)
           tokens[i] = t3
           tokens.pop(i+1)
         else: i += 1
-    self.pair_counts[pair] = 0
+    self.pair_counts.pop(pair, None)
     return list(updated)
 
 
@@ -290,7 +274,7 @@ def _stream_chunks(
       remainder = chunk
       continue
 
-    remainder = chunk[last_match.start():]
+    remainder = chunk[last_match.end():]
     counts[last_match.group()] += 1
 
   return counts
@@ -337,6 +321,7 @@ def create_bpe(
   corpus = _TokenMergeTracker(counts, token_to_idx, special_tokens)
   heap = [(-count, pair) for pair, count in corpus.pair_counts.items()]
   heapq.heapify(heap)
+  merges = dict()
 
   while len(vocab) < vocab_size and heap:
     neg_count, pair = heapq.heappop(heap)
@@ -350,6 +335,7 @@ def create_bpe(
     new_token = vocab[t1] + vocab[t2]
     vocab.append(new_token)
     token_to_idx[new_token] = t3
+    merges[t3] = (t1, t2)
     updated = corpus.merge(pair, t3)
     for updated_pair in updated:
       c = corpus.pair_counts.get(updated_pair, 0)
@@ -358,4 +344,4 @@ def create_bpe(
           (-c, updated_pair)
         )
 
-  return Vocabulary(config, vocab)
+  return Vocabulary(config, vocab, merges)
