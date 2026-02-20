@@ -1,4 +1,4 @@
-## TODO
+## model additions
 - [ ] `gpt-v3`: refined "baseline" model
   - [X] RMSNorm
   - [X] remove dropout
@@ -17,3 +17,11 @@
   - mostly tocompare with nanoGPT speedrun
 - [ ] `gpt-v3-swiglu`: SwiGLU activation
 - [ ] `gpt-v3-gelu` GELU activation
+## repo changes
+- [ ] improved tokenization algorithms
+  - [ ] *use merge rank lookup instead of Trie
+  - [ ] maybe add regular heap cleaning
+  - [ ] add regular checking / clearing out when 0ed items (Counter, pair_to_words)
+- [ ] add support for cloud compute
+  - [ ] able to download data (Colab / ssh-like)
+  - [ ] able to persist work (Colab / ssh-like)
