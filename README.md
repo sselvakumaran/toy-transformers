@@ -19,9 +19,9 @@
 - [ ] `gpt-v3-gelu` GELU activation
 ## repo changes
 - [ ] improved tokenization algorithms
-  - [ ] *use merge rank lookup instead of Trie
-  - [ ] maybe add regular heap cleaning
-  - [ ] add regular checking / clearing out when 0ed items (Counter, pair_to_words)
+  - [X] *use merge rank lookup instead of Trie
+  - [ ] ~~maybe add regular heap cleaning~~
+  - [X] add regular checking / clearing out when 0ed items (Counter, pair_to_words)
 - [ ] add support for cloud compute
   - [ ] able to download data (Colab / ssh-like)
   - [ ] able to persist work (Colab / ssh-like)
