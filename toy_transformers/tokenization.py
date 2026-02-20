@@ -23,9 +23,9 @@ DEFAULT_PATTERN = r"|".join([
   r"'(?i:[sdmt]|ll|ve|re)", # contractions
   r"[^\r\n\w]?[^\W\d_]+", # space + letters
   r"\d{1,3}", # numbers
-  # r" ?[^\s\w]+[\r\n]*", # space + punctuation (slow)
+  r" ?[^\s\w]+[\r\n]*", # space + punctuation (slow)
   # r"\s*[\r\n]+", # newlines (slow)
-  r"\s+(?!\S)" # trailing whitespace
+  r"\s+(?!\S)", # trailing whitespace
   r"\s+" # whitespace
 ])
 
