@@ -4,10 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Version 3 - adding...
-# RMSNorm - ADDED
-# RoPE - TO-DO
-# modded-gpt changes - TO RESEARCH
+# Version 3 - RMSNorm, RoPE, ReLU^2, QK-Norm, logit soft-capping
 
 @dataclass(frozen=True)
 class GPTv3Config:
@@ -17,25 +14,54 @@ class GPTv3Config:
   n_heads: int = 8 # number of embedding heads (n_embed / n_heads MUST be an integer)
   n_embed: int = 288 # number of dimensions in embedding vector
   n_layers: int = 6 # number of blocks
-  dropout: float = 0.2 # number of nodes to randomly drop to reduce overfit
+  rope_base: float = 10000.0
+  logit_cap: float = 30.0
   checkpoint: bool = False
+
+
+class RotaryPositionalEmbedding(nn.Module):
+  def __init__(self, config: GPTv3Config):
+    super().__init__()
+    head_dim = config.n_embed // config.n_heads
+    max_seq_len = config.block_size
+    base = config.rope_base
+
+    assert head_dim % 2 == 0
+    # frequencies
+    thetas = torch.pow(base, -torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)
+    # positions
+    t = torch.arange(max_seq_len, dtype=torch.float32)
+    angles = torch.outer(t, thetas)
+
+    freqs_cis = torch.polar(torch.ones_like(angles), angles)
+    self.register_buffer("freqs_cis", freqs_cis)
+
+  def forward(self, q: torch.Tensor, k: torch.Tensor):
+    # q, k ~ (B, n_heads, T, head_dim)
+    _, _, T, _ = q.shape
+    freqs = self.freqs_cis[:T].view(1, 1, T, -1)
+
+    q_complex = torch.view_as_complex(q.float().reshape(*q.shape[:-1], -1, 2))
+    k_complex = torch.view_as_complex(k.float().reshape(*k.shape[:-1], -1, 2))
+
+    q_rotated = torch.view_as_real(q_complex * freqs).flatten(-2)
+    k_rotated = torch.view_as_real(k_complex * freqs).flatten(-2)
+
+    return q_rotated.type_as(q), k_rotated.type_as(k)
 
 
 class CausalSelfAttention(nn.Module):
   def __init__(self, config: GPTv3Config):
     super().__init__()
     self.n_heads, self.n_embed = config.n_heads, config.n_embed
-    if self.n_embed % self.n_heads != 0:
-      raise ValueError("n_embed is not a multiple of n_heads")
+    assert self.n_embed % self.n_heads == 0
     # batch k,q,v into one linear block
     # when doing forward pass, each head will be per batch
     # note n_embed = n_heads * <some factor>
     self.qkv_block = nn.Linear(self.n_embed, 3 * self.n_embed)
     self.proj = nn.Linear(config.n_embed, config.n_embed)
     self.proj.__INIT_SCALAR__ = (2 * config.n_layers) ** -0.5
-
-    self.proj_dp = nn.Dropout(config.dropout)
-    self.dropout = config.dropout
+    self.rope = RotaryPositionalEmbedding(config=config)
 
   def forward(self, x: torch.Tensor):
     # get k,q,v linear block
@@ -46,27 +72,26 @@ class CausalSelfAttention(nn.Module):
     # view must be (B, n_heads, T, n_head_embed) needed for scaled_dot_product_attention
     q = q_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
     k = k_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
+
+    q, k = self.rope(q, k)
     v = v_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
-    y = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
+
+    y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
     y_joined = y.transpose(1, 2).contiguous().view(B, T, self.n_embed)
-    y_proj = self.proj_dp(self.proj(y_joined))
-    return y_proj
+    return self.proj(y_joined)
 
 
 class MultiLayerPerceptron(nn.Module):
   def __init__(self, config: GPTv3Config):
     super().__init__()
     self.l1 = nn.Linear(config.n_embed, 4*config.n_embed)
-    self.gelu = nn.GELU(approximate='tanh')
     self.proj = nn.Linear(4*config.n_embed, config.n_embed)
     self.proj.__INIT_SCALAR__ = (2 * config.n_layers) ** -0.5
-    self.proj_dp = nn.Dropout(config.dropout)
 
   def forward(self, x: torch.Tensor):
     x = self.l1(x)
-    x = self.gelu(x)
+    x = F.relu(x).square()
     x = self.proj(x)
-    x = self.proj_dp(x)
     return x
 
 
@@ -95,17 +120,11 @@ class LanguageModel(nn.Module):
     self.config = config
 
     vocab_size = config.vocab_size
-    block_size = config.block_size
 
     self.token_embed = nn.Embedding(vocab_size, config.n_embed)
-    self.position_embed = nn.Embedding(block_size, config.n_embed)
-    self.dp = nn.Dropout(config.dropout)
     self.blocks = nn.Sequential(*[TransformerBlock(config) for _ in range(config.n_layers)])
     self.ln = nn.RMSNorm(config.n_embed)
     self.head = nn.Linear(config.n_embed, vocab_size, bias=False)
-    self.token_embed.weight = self.head.weight
-
-    self.register_buffer("pos", torch.arange(block_size).unsqueeze(0))
 
     def _init_weights(module, base_std=0.02):
       if isinstance(module, nn.Linear):
@@ -119,28 +138,29 @@ class LanguageModel(nn.Module):
         torch.nn.init.ones_(module.weight)
 
     self.apply(_init_weights)
+    # tie weights after init
+    self.token_embed.weight = self.head.weight
 
-  def forward(self, idx: torch.tensor, targets=None):
+  def forward(self, idx: torch.Tensor, targets=None):
     _, T = idx.size() # number of batches, token sequence
     block_size = self.config.block_size
 
     idx: torch.Tensor = idx if T <= block_size else idx[:, -block_size:]
 
-    pos_e = self.position_embed(self.pos[:, :T])
     tok_e = self.token_embed(idx)
-    x = torch.add(pos_e, tok_e)
-    x = self.dp(x)
+    x = tok_e
     if self.config.checkpoint:
       for block in self.blocks:
         x = torch.utils.checkpoint.checkpoint(block, x)
     else:
       x = self.blocks(x)
     x = self.ln(x)
-    if targets is None:
-      logits = self.head(x[:, [-1], :])
-      return logits, None
-
+    
+    if targets is None: x = x[:, [-1], :]
     logits = self.head(x)
+    logits = self.config.logit_cap * torch.tanh(logits / self.config.logit_cap)
+
+    if targets is None: return logits, None
     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
     return logits, loss
 
@@ -174,19 +194,21 @@ class LanguageModel(nn.Module):
     self.eval()
     for _ in range(max_new_tokens):
       idx_cond = idx[:, -block_size:]
-      _, T = idx_cond.shape
-      with torch.no_grad():
-        device_type = device.type
-        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-          logits, _ = self(idx_cond)
-        logits = logits[:, -1, :]
-        probs = F.softmax(logits / temperature, dim = -1)
-        if topk <= 0:
-          xcol = torch.multinomial(probs, num_samples = 1)
-        else:
-          top_p, top_i = torch.topk(probs, topk, dim=-1)
-          ix = torch.multinomial(top_p, num_samples=1)
-          xcol = torch.gather(top_i, -1, ix)
-        idx = torch.cat((idx, xcol), dim=1)
-        yield xcol
+      device_type = device.type
+      with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        logits, _ = self(idx_cond)
+      logits = logits[:, -1, :].float()
+      probs = F.softmax(logits / temperature, dim = -1)
+      if torch.isnan(probs).any() or torch.isinf(probs).any():
+        print(f"logits range: [{logits.min():.2f}, {logits.max():.2f}]")
+        print(f"probs has nan: {torch.isnan(probs).any()}, inf: {torch.isinf(probs).any()}")
+        break
+      if topk <= 0:
+        xcol = torch.multinomial(probs, num_samples = 1)
+      else:
+        top_p, top_i = torch.topk(probs, topk, dim=-1)
+        ix = torch.multinomial(top_p, num_samples=1)
+        xcol = torch.gather(top_i, -1, ix)
+      idx = torch.cat((idx, xcol), dim=1)
+      yield xcol
     self.train()
