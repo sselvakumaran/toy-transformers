@@ -6,3 +6,4 @@
 /.vscode
 **/.DS_Store
 experiments/*/checkpoints/
+experiments/*/data
