@@ -1,5 +1,5 @@
 ## model additions
-- [ ] `gpt-v3`: refined "baseline" model
+- [X] `gpt-v3`: refined "baseline" model
   - [X] RMSNorm
   - [X] remove dropout
   - [X] RoPE
