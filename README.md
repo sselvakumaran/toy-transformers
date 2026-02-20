@@ -1,26 +1,27 @@
-## TODO
-- `gpt-v3`
-  - Refined "Baseline" model
-  - RMSNorm
-  - RoPE
-  - ReLU^2 activation
-  - QK-Norm
-  - Logit soft-capping
-- `gpt-v3-gqa`
-  - Grouped Query Attention
+## model additions
+- [ ] `gpt-v3`: refined "baseline" model
+  - [X] RMSNorm
+  - [X] remove dropout
+  - [X] RoPE
+  - [X] ReLU^2 activation
+  - [X] ~~QK-Norm~~ (not added, unstable at this size)
+  - [X] logit soft-capping
+- [ ] `gpt-v3-gqa`: Grouped Query Attention
   - simple, mostly to compare with MLA
-- `gpt-v3-mla`
-  - Multi-head Latent Attention (Deepseek)
+- [ ] `gpt-v3-mla`: Multi-head Latent Attention (Deepseek)
   - might need to remove RoPE? implementation is majorly different
-- `gpt-v3-moe`
-  - Mixture-of-Experts
+- [ ] `gpt-v3-moe`: Mixture-of-Experts
   - may need secondary loss to make sure routing is handled well
-- `gpt-v3-mtp`
-  - Multi-Token Prediction
-- `gpt-v3-swa`
-  - Sliding Window Attention
+- [ ] `gpt-v3-mtp`: Multi-Token Prediction
+- [ ] `gpt-v3-swa`: Sliding Window Attention
   - mostly tocompare with nanoGPT speedrun
-- `gpt-v3-swiglu`
-  - use SwiGLU instead of ReLU^2
-- `gpt-v3-gelu`
-  - use GELU instead of ReLU^2
+- [ ] `gpt-v3-swiglu`: SwiGLU activation
+- [ ] `gpt-v3-gelu` GELU activation
+## repo changes
+- [ ] improved tokenization algorithms
+  - [ ] *use merge rank lookup instead of Trie
+  - [ ] maybe add regular heap cleaning
+  - [ ] add regular checking / clearing out when 0ed items (Counter, pair_to_words)
+- [ ] add support for cloud compute
+  - [ ] able to download data (Colab / ssh-like)
+  - [ ] able to persist work (Colab / ssh-like)
