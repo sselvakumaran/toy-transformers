@@ -165,7 +165,10 @@ class LanguageModel(nn.Module):
     return f"{n}"
 
   @torch.no_grad()
-  def generate(self, seed: torch.Tensor, max_new_tokens, temperature=1.0, topk=-1):
+  def generate(self, 
+    seed: torch.Tensor, max_new_tokens, temperature=1.0, topk=-1, 
+    use_bfloat: bool = True
+  ):
     device = seed.device  # get device from input tensor
     block_size = self.config.block_size
     idx = seed
@@ -175,9 +178,14 @@ class LanguageModel(nn.Module):
       _, T = idx_cond.shape
       with torch.no_grad():
         device_type = device.type
-        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+
+        if use_bfloat:
+          with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+            logits, _ = self(idx_cond)
+        else:
           logits, _ = self(idx_cond)
         logits = logits[:, -1, :]
+
         probs = F.softmax(logits / temperature, dim = -1)
         if topk <= 0:
           xcol = torch.multinomial(probs, num_samples = 1)
