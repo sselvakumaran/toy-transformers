@@ -187,7 +187,10 @@ class LanguageModel(nn.Module):
     return f"{n}"
 
   @torch.no_grad()
-  def generate(self, seed: torch.Tensor, max_new_tokens, temperature=1.0, topk=-1):
+  def generate(self, 
+    seed: torch.Tensor, max_new_tokens, temperature=1.0, topk=-1,
+    use_bfloat: bool = True
+  ):
     device = seed.device  # get device from input tensor
     block_size = self.config.block_size
     idx = seed
@@ -195,9 +198,14 @@ class LanguageModel(nn.Module):
     for _ in range(max_new_tokens):
       idx_cond = idx[:, -block_size:]
       device_type = device.type
-      with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+      
+      if use_bfloat:
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+          logits, _ = self(idx_cond)
+      else:
         logits, _ = self(idx_cond)
       logits = logits[:, -1, :].float()
+
       probs = F.softmax(logits / temperature, dim = -1)
       if torch.isnan(probs).any() or torch.isinf(probs).any():
         print(f"logits range: [{logits.min():.2f}, {logits.max():.2f}]")
