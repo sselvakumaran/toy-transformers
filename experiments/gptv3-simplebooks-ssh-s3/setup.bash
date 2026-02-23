@@ -1,7 +1,6 @@
 #!/bin/bash
 set -e
 
-
 if [ -z "$1" ]; then
   echo "usage (within repo): ./setup BUCKET_LOCATION"
   echo "ie. BUCKET_NAME/.../REPO_DIR"
@@ -43,7 +42,7 @@ else
     mkdir -p "$(dirname "$RAW_DIR")"
     wget -q --show-progress -O /tmp/simplebooks.zip \
       "https://dldata-public.s3.us-east-2.amazonaws.com/simplebooks.zip"
-    unzip -q /tmp/simplebooks.zip -d "${REPO_DIR}/data/raw/simplebooks/"
+    unzip -q /tmp/simplebooks.zip -d "${REPO_DIR}/data/raw/"
     rm /tmp/simplebooks.zip
   else
     echo "[PREPROCESS] raw dataset found locally"

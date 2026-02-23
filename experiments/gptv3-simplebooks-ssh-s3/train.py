@@ -37,7 +37,7 @@ MIN_LR = 3e-5
 WARMUP_STEPS = 500
 NUM_EPOCHS = 10
 
-EVAL_INTERVAL = 100
+EVAL_INTERVAL = 1000
 EVAL_BATCHES = 20
 LOG_INTERVAL = 10
 
@@ -268,12 +268,12 @@ def main():
             metrics[-1]["val_loss"] = val_loss
           if val_loss < best_val_loss:
             best_val_loss = val_loss
-            checkpoint_save_s3(
-              CKPT_DIR / "best", m, 
-              config, TRAINING_CONFIG,
-              metrics,
-              optimizer=optimizer, scheduler=scheduler
-            )
+            # checkpoint_save_s3(
+            #   CKPT_DIR / "best", m, 
+            #   config, TRAINING_CONFIG,
+            #   metrics,
+            #   optimizer=optimizer, scheduler=scheduler
+            # )
           t0 = time.time()
     
       checkpoint_save_s3(
