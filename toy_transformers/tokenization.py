@@ -9,10 +9,10 @@ from enum import Enum
 from functools import cached_property
 import heapq
 import json
+import multiprocessing as mp
 from pathlib import Path
 import re
-from typing import Dict, List, Optional, Set, Tuple, Union
-from io import BufferedIOBase, RawIOBase, TextIOBase
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 
 Token = str | bytes
 TokenSequence = str | bytes
@@ -48,14 +48,19 @@ class TokenizationConfig():
   vocab_size: int
   special_tokens_str: List[str]
   pattern_str: str
+  num_workers: int = 1
   special_tokens: Optional[List[Token]] = field(init=False, repr=False)
   pattern: Optional[re.Pattern] = field(init=False, repr=False)
 
   def __post_init__(self):
-    typed_pattern_str = self.pattern_str
+    raw_pattern = self.pattern_str
+    if self.special_tokens_str:
+      sorted_special_tokens = sorted(self.special_tokens_str, key=len, reverse=True)
+      escaped = [re.escape(s) for s in sorted_special_tokens]
+      raw_pattern = "|".join(escaped) + "|" + self.pattern_str
     if self.mode == TokenizationMode.BYTES:
-      typed_pattern_str = self.pattern_str.encode(ENCODING)
-    self.pattern = re.compile(typed_pattern_str)
+      raw_pattern = raw_pattern.encode(ENCODING)
+    self.pattern = re.compile(raw_pattern)
 
     typed_special_tokens = self.special_tokens_str
     if self.mode == TokenizationMode.BYTES:
@@ -82,14 +87,21 @@ class Vocabulary():
   
   def encode(self, text: TokenSequence) -> List[int]:
     if not self.config.mode.match(text):
-      raise ValueError(f"cannot use type f{type(text).__name__} on {self.mode}-based vocab")
+      raise ValueError(f"cannot use type {type(text).__name__} on {self.config.mode}-based vocab")
     
     out = []
     pair_to_rank: dict = self._pair_to_rank
     cache = {}
 
+    special_set = set(self.config.special_tokens)
+
     for m in re.finditer(self.config.pattern, text):
       chunk = m.group(0)
+
+      if chunk in special_set:
+        out.append(self.token_to_idx[chunk])
+        continue
+
       if chunk in cache:
         out.extend(cache[chunk])
         continue
@@ -168,11 +180,14 @@ class Vocabulary():
     )
 
 
+
+
 class _TokenMergeTracker():
-  word_encodings: Dict[int, List[Token]]
+  word_encodings: Dict[int, List[int]]
   pair_counts: Counter
   word_counts: Counter
-  pair_to_words: Dict[Tuple[Token, Token], Set[int]]
+  pair_to_words: Dict[Tuple[int, int], Set[int]]
+  live_words: Set[int]
 
   def __init__(self,
     word_counts: Counter,
@@ -199,18 +214,22 @@ class _TokenMergeTracker():
     self.pair_counts = Counter()
     self.word_counts = Counter()
     self.pair_to_words = defaultdict(set)
+    self.live_words = set()
     for word_idx, (word, count) in enumerate(word_counts.items()):
       tokens = to_atomic(word)
       self.word_encodings[word_idx] = tokens
       self.word_counts[word_idx] = count
+      if len(tokens) >= 2:
+        self.live_words.add(word_idx)
+      
       for i in range(len(tokens) - 1):
         pair = (tokens[i], tokens[i+1])
         self.pair_counts[pair] += count
         self.pair_to_words[pair].add(word_idx)
 
-  def merge(self, pair, t3: int):
+  def merge(self, pair: Tuple[int, int], t3: int) -> List[Tuple[int, int]]:
     t1, t2 = pair
-    updated = set()
+    updated_pairs: Set[Tuple[int, int]] = set()
     for word_idx in self.pair_to_words.pop(pair, []):
       count = self.word_counts[word_idx]
       tokens = self.word_encodings[word_idx]
@@ -223,11 +242,13 @@ class _TokenMergeTracker():
             self.pair_counts[old_pair] -= count
             if self.pair_counts[old_pair] <= 0:
               del self.pair_counts[old_pair]
-              self.pair_to_words.pop(old_pair, None)
+              self.pair_to_words[old_pair].discard(word_idx)
+              if not self.pair_to_words[old_pair]:
+                del self.pair_to_words[old_pair]
             
             self.pair_counts[new_pair] += count
             self.pair_to_words[new_pair].add(word_idx)
-            updated.add(new_pair)
+            updated_pairs.add(new_pair)
           
           if i + 2 < len(tokens):
             old_pair, new_pair = (t2, tokens[i+2]), (t3, tokens[i+2])
@@ -235,78 +256,93 @@ class _TokenMergeTracker():
             self.pair_counts[old_pair] -= count
             if self.pair_counts[old_pair] <= 0:
               del self.pair_counts[old_pair]
-              self.pair_to_words.pop(old_pair, None)
+              self.pair_to_words[old_pair].discard(word_idx)
+              if not self.pair_to_words[old_pair]:
+                del self.pair_to_words[old_pair]
 
             self.pair_counts[new_pair] += count
             self.pair_to_words[new_pair].add(word_idx)
-            updated.add(new_pair)
+            updated_pairs.add(new_pair)
           tokens[i] = t3
-          tokens.pop(i+1)
-        else: i += 1
+          tokens.pop(i + 1)
+        else:
+          i += 1
+      if len(tokens) < 2:
+        self.live_words.discard(word_idx)
     self.pair_counts.pop(pair, None)
-    return list(updated)
+    return list(updated_pairs)
 
+def _preprocess_shard(args: tuple[TokenSequence, TokenizationConfig]):
+  text, pattern_str, mode_value = args
+  mode = TokenizationMode(mode_value)
+  if mode == TokenizationMode.BYTES:
+    pattern_str = pattern_str.encode(ENCODING)
+  pattern = re.compile(pattern_str)
 
-def _stream_chunks(
-  data_handle: Union[TextIOBase, BufferedIOBase],
-  pattern: re.Pattern,
-  mode: TokenizationMode,
-  chunk_size: int,
-) -> Counter:
   counts = Counter()
-  remainder = "" if mode == TokenizationMode.STR else b""
-  while True:
-    incoming_chunk = data_handle.read(chunk_size)
-    if not incoming_chunk:
-      if remainder:
-        for m in pattern.finditer(remainder):
-          counts[m.group()] += 1
-      break
-
-    chunk = remainder + incoming_chunk
-    last_match = None
-    for m in pattern.finditer(chunk):
-      if last_match is not None:
-        counts[last_match.group()] += 1
-      last_match = m
-
-    if last_match is None:
-      remainder = chunk
-      continue
-
-    remainder = chunk[last_match.end():]
-    counts[last_match.group()] += 1
-
+  for m in pattern.finditer(text):
+    counts[m.group()] += 1
   return counts
+
+def _parallel_preprocess(
+  data_iter: Iterable[TokenSequence],
+  config: TokenizationConfig
+):
+
+  raw = config.pattern.pattern
+  if isinstance(raw, bytes):
+    raw = raw.decode(ENCODING)
+  mode_val = config.mode.value
+
+  def make_args():
+    for text in data_iter:
+      yield (text, raw, mode_val)
+  
+  total_counts = Counter()
+
+  from tqdm import tqdm
+  pbar = tqdm(total=None, desc="preprocessing", unit="shard")
+
+  if config.num_workers <= 1:
+    for args in make_args():
+      total_counts += _preprocess_shard(args)
+      pbar.update(1)
+  else:
+    with mp.Pool(config.num_workers) as pool:
+      for shard_counts in pool.imap_unordered(_preprocess_shard, make_args()):
+        total_counts += shard_counts
+        pbar.update(1)
+
+  pbar.close()
+  
+  return total_counts
 
 
 def create_bpe(
-  data_handle: Union[TextIOBase, BufferedIOBase],
+  data_iter: Iterable[TokenSequence],
   vocab_size: int,
   mode: Optional[TokenizationMode] = TokenizationMode.STR,
   splitting_pattern: Optional[str] = DEFAULT_PATTERN,
   special_tokens: Optional[List[str]] = None,
-  read_chunk_size: int = 10_000_000
+  num_workers: Optional[int] = None,
+  heap_cleanup_ratio: float = 4.0,
 ) -> Vocabulary:
-  is_handle_binary = isinstance(data_handle, (RawIOBase, BufferedIOBase))
-  if mode == TokenizationMode.BYTES:
-    assert is_handle_binary, \
-      "training via bytes, but file was not opened in binary mode"
-  else:
-    assert not is_handle_binary, \
-      "training via text, but file was opened in binary mode"
+  if num_workers is None:
+    num_workers = max(1, (mp.cpu_count() or 1) - 2)
   
   config = TokenizationConfig(
-    mode, vocab_size, special_tokens or [],
-    splitting_pattern
+    mode, 
+    vocab_size, 
+    special_tokens_str=special_tokens or [],
+    pattern_str=splitting_pattern, 
+    num_workers=num_workers
   )
-  pattern = config.pattern
-  special_tokens = config.special_tokens
 
-  counts = _stream_chunks(data_handle, pattern, mode, read_chunk_size)
+  counts = _parallel_preprocess(data_iter, config)
 
   base_tokens = []
-  special_token_set = set(special_tokens)
+  special_token_set = set(config.special_tokens)
+
   if mode == TokenizationMode.BYTES:
     base_tokens = [bytes([i]) for i in range(256)
       if bytes([i]) not in special_token_set]
@@ -315,33 +351,47 @@ def create_bpe(
     for word in counts:
       chars.update(word)
     base_tokens = sorted(chars - special_token_set)
-  vocab = special_tokens + base_tokens
+  vocab = list(config.special_tokens) + base_tokens
   token_to_idx = {c: i for i, c in enumerate(vocab)}
 
-  corpus = _TokenMergeTracker(counts, token_to_idx, special_tokens)
+  corpus = _TokenMergeTracker(counts, token_to_idx, config.special_tokens)
   heap = [(-count, pair) for pair, count in corpus.pair_counts.items()]
   heapq.heapify(heap)
   merges = dict()
+  num_live_pairs = len(corpus.pair_counts)
+
+  print("starting merging...")
+
+  from tqdm import tqdm
+  pbar = tqdm(total=vocab_size - len(vocab), desc="BPE Training")
 
   while len(vocab) < vocab_size and heap:
+    if heap_cleanup_ratio > 0 and len(heap) > heap_cleanup_ratio * max(num_live_pairs, 1):
+      heap = [(-c, p) for p, c in corpus.pair_counts.items() if c > 0]
+      heapq.heapify(heap)
+      num_live_pairs = len(heap)
     neg_count, pair = heapq.heappop(heap)
     actual_count = corpus.pair_counts.get(pair, 0)
     if actual_count != -neg_count:
-      if actual_count > 0: heapq.heappush(heap, (-actual_count, pair))
+      if actual_count > 0:
+        heapq.heappush(heap, (-actual_count, pair))
       continue
-    if actual_count == 0: continue
+    if actual_count == 0:
+      continue
     t3 = len(vocab)
     t1, t2 = pair
     new_token = vocab[t1] + vocab[t2]
     vocab.append(new_token)
     token_to_idx[new_token] = t3
     merges[t3] = (t1, t2)
-    updated = corpus.merge(pair, t3)
-    for updated_pair in updated:
-      c = corpus.pair_counts.get(updated_pair, 0)
+    updated_pairs = corpus.merge(pair, t3)
+    for p in updated_pairs:
+      c = corpus.pair_counts.get(p, 0)
       if c > 0:
-        heapq.heappush(heap,
-          (-c, updated_pair)
-        )
+        heapq.heappush(heap, (-c, p))
+    
+    pbar.update(1)
+  
+  pbar.close()
 
   return Vocabulary(config, vocab, merges)
