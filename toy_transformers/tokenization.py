@@ -180,8 +180,6 @@ class Vocabulary():
     )
 
 
-
-
 class _TokenMergeTracker():
   word_encodings: Dict[int, List[int]]
   pair_counts: Counter
@@ -272,6 +270,7 @@ class _TokenMergeTracker():
     self.pair_counts.pop(pair, None)
     return list(updated_pairs)
 
+
 def _preprocess_shard(args: tuple[TokenSequence, TokenizationConfig]):
   text, pattern_str, mode_value = args
   mode = TokenizationMode(mode_value)
@@ -327,6 +326,8 @@ def create_bpe(
   num_workers: Optional[int] = None,
   heap_cleanup_ratio: float = 4.0,
 ) -> Vocabulary:
+  from tqdm import tqdm
+
   if num_workers is None:
     num_workers = max(1, (mp.cpu_count() or 1) - 2)
   
@@ -361,8 +362,6 @@ def create_bpe(
   num_live_pairs = len(corpus.pair_counts)
 
   print("starting merging...")
-
-  from tqdm import tqdm
   pbar = tqdm(total=vocab_size - len(vocab), desc="BPE Training")
 
   while len(vocab) < vocab_size and heap:
@@ -395,3 +394,119 @@ def create_bpe(
   pbar.close()
 
   return Vocabulary(config, vocab, merges)
+
+import numpy as np
+
+def _write_shard(path: Path, tokens: np.ndarray):
+  assert tokens.dtype == np.uint16
+  with open(path, "wb") as f:
+    f.write(tokens.tobytes())
+
+def _read_shard(path: Path) -> np.ndarray:
+  with open(path, "rb") as f:
+    return np.frombuffer(f.read(), dtype=np.uint16)
+
+_worker_vocab: Vocabulary = None
+
+def _init_encode_worker(vocab_path: str):
+  global _worker_vocab
+  _worker_vocab = Vocabulary.load(vocab_path)
+
+def _bulk_encode_worker(text: TokenSequence) -> np.ndarray:
+  ids = _worker_vocab.encode(text)
+  return np.array(ids, dtype=np.uint16)
+
+# ASSUMES doc_iter ALREADY HAS SPLIT_TOKENS WITHIN IT!
+# obviously retokenizing the BOS token is less efficient than adding it, 
+# will change if meaningful speed improvements later
+def bulk_encode(
+  doc_iter: Iterable[TokenSequence],
+  vocab: Vocabulary,
+  vocab_path: Path,
+  output_dir: Path,
+  split_token: Token,
+  shard_size: int = 100_000_000,
+  num_workers: Optional[int] = None,
+):
+  from tqdm import tqdm
+
+  if num_workers is None:
+    num_workers = max(1, (mp.cpu_count() or 1) - 2)
+
+  output_dir = Path(output_dir)
+  output_dir.mkdir(parents=True, exist_ok=True)
+
+  if vocab.config.mode == TokenizationMode.BYTES:
+    split_tok = split_token.encode(ENCODING)
+  else:
+    split_tok = split_token
+  split_id = vocab.token_to_idx[split_tok]
+
+  vocab_path = Path(vocab_path)
+
+  buf = np.empty(shard_size, dtype=np.uint16)
+  buf_pos = 0
+  shard_idx = 0
+  shard_token_counts = []
+
+  def flush_shard(buf_pos, shard_idx, shard_token_counts):
+    if buf_pos == 0:
+      return buf_pos, shard_idx
+    path = output_dir / f"shard_{shard_idx:04d}.bin"
+    _write_shard(path, buf[:buf_pos])
+    shard_token_counts.append(buf_pos)
+    print(f"wrote {buf_pos:,} tokens to {path.name}")
+    return 0, shard_idx + 1
+  
+  def append_tokens(tokens: np.ndarray, buf_pos, shard_idx):
+    remaining = tokens
+    while len(remaining) > 0:
+      space = shard_size - buf_pos
+      take = min(space, len(remaining))
+      buf[buf_pos:buf_pos + take] = remaining[:take]
+      buf_pos += take
+      remaining = remaining[take:]
+      if buf_pos < shard_size:
+        continue
+      # writing
+      split_positions = np.where(buf[:buf_pos] == split_id)[0]
+      
+      # if document larger than shard length
+      if not (len(split_positions) > 0 and split_positions[-1] > 0):
+        buf_pos, shard_idx = flush_shard(buf_pos, shard_idx, shard_token_counts)
+        continue
+      
+      # cut by last document
+      cut = int(split_positions[-1])
+      leftover = buf_pos - cut
+      _, shard_idx = flush_shard(cut, shard_idx, shard_token_counts)
+      buf[:leftover] = buf[cut:cut + leftover]
+      buf_pos = leftover
+    return buf_pos, shard_idx
+  
+  pbar = tqdm(desc="encoding", unit="chunk")
+
+  if num_workers <= 1:
+    _init_encode_worker(str(vocab_path))
+    for text in doc_iter:
+      buf_pos, shard_idx = append_tokens(_bulk_encode_worker(text), buf_pos, shard_idx)
+      pbar.update(1)
+  else:
+    with mp.Pool(num_workers, initializer=_init_encode_worker, initargs=(vocab_path,)) as pool:
+      for encoded in pool.imap(_bulk_encode_worker, doc_iter):
+        buf_pos, shard_idx = append_tokens(encoded, buf_pos, shard_idx)
+        pbar.update(1)
+  
+  buf_pos, shard_idx = flush_shard(buf_pos, shard_idx, shard_token_counts)
+  pbar.close()
+
+  meta = {
+    "num_shards": shard_idx,
+    "vocab_path": str(vocab_path),
+    "shard_tokens": {
+      f"shard_{i:04d}.bin": int(count) for i, count in enumerate(shard_token_counts)
+    }
+  }
+  with open(output_dir / "meta.json", "w") as f:
+    json.dump(meta, f, indent=2)
+  
