@@ -503,6 +503,7 @@ def bulk_encode(
   meta = {
     "num_shards": shard_idx,
     "vocab_path": str(vocab_path),
+    "split_id": split_id,
     "shard_tokens": {
       f"shard_{i:04d}.bin": int(count) for i, count in enumerate(shard_token_counts)
     }
@@ -510,3 +511,11 @@ def bulk_encode(
   with open(output_dir / "meta.json", "w") as f:
     json.dump(meta, f, indent=2)
   
+def shuffle_shards(
+  input_dir: Path,
+  output_dir: Path,
+  seed: int = 42,
+  read_chunk_tokens: int = 4096,
+  write_buffer_tokens: int = 1_000_000,   
+):
+  pass
