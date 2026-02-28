@@ -20,7 +20,7 @@ class ShardedTokenDataset(IterableDataset):
     self.block_size = block_size
     self.bos_id = bos_id
     self.pad_id = pad_id
-    self.max_doc_len = max_doc_len or (block_size * 2)
+    self.max_doc_len = max_doc_len or block_size
     self.shuffle_docs = shuffle_docs
     self.seed = seed
 
