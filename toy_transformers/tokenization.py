@@ -13,6 +13,7 @@ import multiprocessing as mp
 from pathlib import Path
 import re
 from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
+import random
 
 Token = str | bytes
 TokenSequence = str | bytes
@@ -508,14 +509,111 @@ def bulk_encode(
       f"shard_{i:04d}.bin": int(count) for i, count in enumerate(shard_token_counts)
     }
   }
-  with open(output_dir / "meta.json", "w") as f:
+  with open(output_dir / "metadata.json", "w") as f:
     json.dump(meta, f, indent=2)
   
 def shuffle_shards(
   input_dir: Path,
   output_dir: Path,
   seed: int = 42,
-  read_chunk_tokens: int = 4096,
+  read_chunk_tokens: int = 1_000_000,
   write_buffer_tokens: int = 1_000_000,   
 ):
-  pass
+  from tqdm import tqdm
+
+  input_dir = Path(input_dir)
+  output_dir = Path(output_dir)
+  output_dir.mkdir(parents=True, exist_ok=True)
+
+  with open(input_dir / "metadata.json", "r") as f:
+    meta = json.load(f)
+  split_id = meta.get("split_id", 0)
+  shard_names: list[str] = sorted(meta["shard_tokens"].keys())
+  num_shards = meta.get("num_shards", 1)
+
+  rng = random.Random(seed)
+
+  out_bufs: List[List[np.ndarray]] = [[] for _ in range(num_shards)]
+  out_buf_sizes = [0 for _ in range(num_shards)]
+  out_token_counts = [0 for _ in range(num_shards)]
+  out_paths = [output_dir / f"shard_{i:04d}.bin" for i in range(num_shards)]
+
+  for p in out_paths: 
+    p.write_bytes(b"")
+  
+  def flush_output(shard_idx):
+    if out_buf_sizes[shard_idx] == 0:
+      return
+    
+    combined = np.concatenate(out_bufs[shard_idx])
+    with open(out_paths[shard_idx], 'ab') as f:
+      f.write(combined.tobytes())
+    
+    out_bufs[shard_idx] = []
+    out_buf_sizes[shard_idx] = 0
+    out_token_counts[shard_idx] += len(combined)
+  
+  def send_doc(doc: np.ndarray):
+    idx = rng.randrange(num_shards)
+    out_bufs[idx].append(doc)
+    out_buf_sizes[idx] += len(doc)
+    if out_buf_sizes[idx] >= write_buffer_tokens:
+      flush_output(idx)
+  
+  total_docs = 0
+  pbar = tqdm(desc="shuffling", unit="doc")
+
+  for shard_name in shard_names:
+    shard_path = input_dir / shard_name
+    file_bytes = shard_path.stat().st_size
+    n_tokens = file_bytes // 2
+    remainder = np.empty(0, dtype=np.uint16)
+
+    with open(shard_path, 'rb') as f:
+      tokens_read = 0
+
+      while tokens_read < n_tokens:
+        chunk_size = min(read_chunk_tokens, n_tokens - tokens_read)
+        raw = f.read(chunk_size * 2)
+        chunk = np.frombuffer(raw, dtype=np.uint16)
+        tokens_read += len(chunk)
+
+        if len(remainder) > 0:
+          chunk = np.concatenate([remainder, chunk])
+          remainder = np.empty(0, dtype=np.uint16)
+        
+        split_positions = np.where(chunk == split_id)[0]
+        if len(split_positions) == 0:
+          remainder = chunk
+          continue
+        
+        for i in range(len(split_positions) - 1):
+          doc = chunk[split_positions[i]:split_positions[i+1]]
+          send_doc(doc)
+          total_docs += 1
+          pbar.update(1)
+        
+        remainder = chunk[split_positions[-1]:]
+
+      if len(remainder) > 0:
+        send_doc(remainder)
+        total_docs += 1
+        pbar.update(1)
+
+  for i in range(num_shards):
+    flush_output(i)
+  
+  pbar.close()
+
+  out_meta = {
+    "num_shards": num_shards,
+    "vocab_path": meta.get("vocab_path"),
+    "split_id": split_id,
+    "shuffled": True,
+    "seed": seed,
+    "shard_tokens": {
+      f"shard_{i:04d}.bin": int(out_token_counts[i]) for i in range(num_shards)
+    }
+  }
+  with open(output_dir / "metadata.json", 'w') as f:
+    json.dump(out_meta, f, indent=2)
