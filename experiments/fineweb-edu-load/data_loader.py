@@ -55,7 +55,7 @@ class ShardedTokenDataset(IterableDataset):
     x = torch.from_numpy(x_np.astype(np.int64))
     y = torch.from_numpy(y_np.astype(np.int64))
     doc_ids = (x == self.bos_id).cumsum(0)
-    loss_mask = (x != self.pad_id)
+    loss_mask = (x != self.pad_id) & (y != self.pad_id)
     return x, y, doc_ids, loss_mask
   
   def __iter__(self):
