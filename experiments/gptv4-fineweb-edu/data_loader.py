@@ -18,39 +18,61 @@ _ERROR_KEY = "__error__"
 class S3Sync():
   # wrapper for syncing files between local and S3
   remote_path: str # something like "s3://BUCKET_NAME/**/toy-transformers/"
-  local_path: str
+  local_path: str | Path
+
+  def __post_init__(self):
+    self.local_path = Path(self.local_path)
+    self.remote_path = self.remote_path.rstrip("/")
 
   def _local_to_remote(self, local_path: Path | str) -> Path:
-    return Path(self.remote_path) / (local_path.relative_to(self.local_path))
+    local_path = Path(local_path)
+    rel = local_path.relative_to(self.local_path)
+    return f"{self.remote_path}/{rel}"
 
   def push(self, local_path: Path | str, dry_run=False) -> bool:
+    local_path = Path(local_path)
     remote = self._local_to_remote(local_path)
-    cmd = ["aws", "s3", "sync", str(local_path), str(remote)]
+    cmd = ["aws", "s3", 
+      "cp" if local_path.is_file() else "sync", 
+      str(local_path), str(remote)
+    ]
     if dry_run:
       print("dry-run: " + " ".join(cmd))
-      return
+      return True
     
-    r = subprocess.run(cmd, check=False)
+    r = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if r.returncode != 0:
+      print(f"push failed: {r.stderr}")
     return r.returncode == 0
   
   def pull(self, local_path: Path | str, dry_run=False) -> bool:
+    local_path = Path(local_path)
     remote = self._local_to_remote(local_path)
-    cmd = ["aws", "s3", "sync", str(remote), str(local_path)]
+    cmd = ["aws", "s3", 
+      "sync" if not local_path.exists() or local_path.is_dir() else "cp", 
+      str(local_path), str(remote)
+    ]
     if dry_run:
       print("dry-run: " + " ".join(cmd))
-      return
+      return True
     
-    r = subprocess.run(cmd, check=False)
+    r = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if r.returncode != 0:
+      print(f"pull failed: {r.stderr}")
     return r.returncode == 0
 
   def exists(self, local_path: Path | str) -> bool:
     remote = self._local_to_remote(local_path)
-    cmd = ["aws", "s3", "ls", str(remote)]
+    if Path(local_path).is_dir() and not remote.endswith("/"):
+      remote += "/"
+    cmd = ["aws", "s3", "ls", remote]
     r = subprocess.run(cmd, check=False, capture_output=True)
     return r.returncode == 0
 
   def ls(self, local_path: Path | str) -> list[str]:
     remote = self._local_to_remote(local_path)
+    if not remote.endswith("/"):
+      remote += "/"
     r = subprocess.run(
       ["aws", "s3", "ls", str(remote)],
       check=False, capture_output=True, text=True,
