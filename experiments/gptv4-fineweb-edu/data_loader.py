@@ -24,7 +24,7 @@ class S3Sync():
     self.local_path = Path(self.local_path)
     self.remote_path = self.remote_path.rstrip("/")
 
-  def _local_to_remote(self, local_path: Path | str) -> Path:
+  def _local_to_remote(self, local_path: Path | str) -> str:
     local_path = Path(local_path)
     rel = local_path.relative_to(self.local_path)
     return f"{self.remote_path}/{rel}"
@@ -32,8 +32,8 @@ class S3Sync():
   def push(self, local_path: Path | str, dry_run=False) -> bool:
     local_path = Path(local_path)
     remote = self._local_to_remote(local_path)
-    cmd = ["aws", "s3", 
-      "cp" if local_path.is_file() else "sync", 
+    cmd = ["aws", "s3",
+      "cp" if local_path.is_file() else "sync",
       str(local_path), str(remote)
     ]
     if dry_run:
@@ -48,19 +48,50 @@ class S3Sync():
   def pull(self, local_path: Path | str, dry_run=False) -> bool:
     local_path = Path(local_path)
     remote = self._local_to_remote(local_path)
-    cmd = ["aws", "s3", 
-      "sync" if not local_path.exists() or local_path.is_dir() else "cp", 
-      str(local_path), str(remote)
+    is_dir = not local_path.exists() or local_path.is_dir()
+    cmd = ["aws", "s3",
+      "sync" if is_dir else "cp", 
+      str(remote), str(local_path)
     ]
     if dry_run:
       print("dry-run: " + " ".join(cmd))
       return True
     
+    local_path.parent.mkdir(parents=True, exist_ok=True)
     r = subprocess.run(cmd, check=False, capture_output=True, text=True)
     if r.returncode != 0:
       print(f"pull failed: {r.stderr}")
     return r.returncode == 0
 
+  def pull_atomic(self, local_path: Path | str, retries: int = 2) -> Path:
+    local_path = Path(local_path)
+    if local_path.exists():
+      return local_path
+
+    remote = self._local_to_remote(local_path)
+    tmp = local_path.with_suffix(".tmp")
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+      for attempt in range(retries):
+        r = subprocess.run(
+          ["aws", "s3", "cp", str(remote), str(tmp)],
+          check=False, capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+          break
+        if attempt < retries - 1:
+          time.sleep(5)
+        else:
+          raise RuntimeError(
+            f"aws s3 cp failed for {remote} (exit {r.returncode}): {r.stderr}"
+          )
+      tmp.rename(local_path)
+      return local_path
+    except Exception as e:
+      if tmp.exists():
+        tmp.unlink()
+      raise e
   def exists(self, local_path: Path | str) -> bool:
     remote = self._local_to_remote(local_path)
     if Path(local_path).is_dir() and not remote.endswith("/"):
@@ -79,58 +110,42 @@ class S3Sync():
     )
     if r.returncode != 0:
       return []
-    return [line.split(maxsplit=3)[-1] for line in r.stdout.splitlines() if line]
+    return [line.split(maxsplit=3)[-1].strip() for line in r.stdout.splitlines() if line]
 
 
 class S3ShardDownloader(mp.Process):
   def __init__(
     self,
-    s3_uris: list[str],
-    local_dir: Path,
+    sync: S3Sync,
+    shard_dir: Path,
     queue: mp.Queue,
     num_epochs: int = 1,
     shuffle: bool = True,
     seed: int = 42,
   ):
     super().__init__(daemon=True)
-    self.s3_uris = s3_uris
-    self.local_dir = Path(local_dir)
+    self.sync = sync
     self.queue = queue
     self.num_epochs = num_epochs
     self.shuffle = shuffle
     self.seed = seed
 
+    self.shard_dir = shard_dir
+    names = self.sync.ls(shard_dir)
+    self.shards = [n for n in names if not n.endswith("/")]
+
   def run(self):
     try:
       for epoch in range(self.num_epochs):
-        uris = list(self.s3_uris)
+        order = list(self.shards)
         if self.shuffle:
-          random.Random(self.seed + epoch).shuffle(uris)
-        for s3_uri in uris:
-          local_path = self.local_dir / s3_uri.split("/")[-1]
-          if not local_path.exists():
-            self._download(s3_uri, local_path)
+          random.Random(self.seed + epoch).shuffle(order)
+        for shard in order:
+          local_path = self.sync.pull_atomic(self.shard_dir / shard)
           self.queue.put(local_path)  # blocking
       self.queue.put(_SENTINEL)
     except Exception as e:
       self.queue.put({_ERROR_KEY: str(e)})
-
-  def _download(self, s3_uri: str, local_path: Path):
-    tmp = local_path.with_suffix(".tmp")
-    try:
-      for attempt in range(2):
-        r = subprocess.run(["aws", "s3", "cp", s3_uri, str(tmp)], check=False)
-        if r.returncode == 0:
-          break
-        if attempt == 0:
-          time.sleep(5)
-        else:
-          raise RuntimeError(f"aws s3 cp failed for {s3_uri} (exit {r.returncode})")
-      tmp.rename(local_path)
-    except Exception:
-      if tmp.exists():
-        tmp.unlink()
-      raise
 
 
 class ShardedTokenDataset(IterableDataset):
