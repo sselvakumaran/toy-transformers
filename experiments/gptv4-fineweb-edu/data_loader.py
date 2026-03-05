@@ -45,12 +45,12 @@ class S3Sync():
       print(f"push failed: {r.stderr}")
     return r.returncode == 0
   
-  def pull(self, local_path: Path | str, dry_run=False) -> bool:
+  def pull(self, local_path: Path | str, is_file: bool = False, dry_run=False) -> bool:
     local_path = Path(local_path)
     remote = self._local_to_remote(local_path)
-    is_dir = not local_path.exists() or local_path.is_dir()
+    use_cp = is_file or (local_path.suffix != "")
     cmd = ["aws", "s3",
-      "sync" if is_dir else "cp", 
+      "cp" if use_cp else "sync", 
       str(remote), str(local_path)
     ]
     if dry_run:
@@ -122,6 +122,8 @@ class S3ShardDownloader(mp.Process):
     num_epochs: int = 1,
     shuffle: bool = True,
     seed: int = 42,
+    start_epoch: int = 0,
+    skip_shards: int = 0,
   ):
     super().__init__(daemon=True)
     self.sync = sync
@@ -129,18 +131,46 @@ class S3ShardDownloader(mp.Process):
     self.num_epochs = num_epochs
     self.shuffle = shuffle
     self.seed = seed
+    self.start_epoch = start_epoch
+    self.skip_shards = skip_shards
 
     self.shard_dir = shard_dir
     names = self.sync.ls(shard_dir)
-    self.shards = [n for n in names if not n.endswith("/")]
+    self.shards = sorted([n for n in names if not n.endswith("/")])
+  
+  @classmethod
+  def from_remote(
+    cls,
+    remote_prefix: str,
+    local_dir: Path,
+    queue: mp.Queue,
+    **kwargs,
+  ) -> "S3ShardDownloader":
+    data_sync = S3Sync(
+      remote_path=remote_prefix,
+      local_path=local_dir,
+    )
+    return cls(
+      sync=data_sync,
+      shard_dir=local_dir,
+      queue=queue,
+      **kwargs,
+    )
+
+  @property
+  def num_shards(self) -> int:
+    return len(self.shards)
 
   def run(self):
     try:
-      for epoch in range(self.num_epochs):
+      for epoch in range(self.start_epoch, self.num_epochs):
         order = list(self.shards)
         if self.shuffle:
           random.Random(self.seed + epoch).shuffle(order)
-        for shard in order:
+
+        skip = self.skip_shards if epoch == self.start_epoch else 0
+        for i, shard in enumerate(order):
+          if i < skip: continue
           local_path = self.sync.pull_atomic(self.shard_dir / shard)
           self.queue.put(local_path)  # blocking
       self.queue.put(_SENTINEL)
@@ -171,6 +201,7 @@ class ShardedTokenDataset(IterableDataset):
     self.shuffle_docs = shuffle_docs
     self.seed = seed
     self.cleanup = cleanup
+    self.shards_consumed = 0
 
   def _iter_docs(self, tokens: np.ndarray, shard_idx: int):
     bos_pos = np.where(tokens == self.bos_id)[0]
@@ -202,7 +233,8 @@ class ShardedTokenDataset(IterableDataset):
 
     x = torch.from_numpy(x_np.astype(np.int64))
     y = torch.from_numpy(y_np.astype(np.int64))
-    doc_ids = (x == self.bos_id).cumsum(0)
+    doc_ids = (x == self.bos_id).cumsum(0) - 1
+    doc_ids = doc_ids.clamp(min=0)
     loss_mask = (x != self.pad_id) & (y != self.pad_id)
     return x, y, doc_ids, loss_mask
 
@@ -221,6 +253,7 @@ class ShardedTokenDataset(IterableDataset):
   def __iter__(self):
     pack = []
     pack_len = 0
+    self.shards_consumed = 0
 
     for shard_idx, shard_path in enumerate(self._shard_iter()):
       raw = np.frombuffer(shard_path.read_bytes(), dtype=np.uint16)
@@ -241,5 +274,6 @@ class ShardedTokenDataset(IterableDataset):
         pack.append(doc)
         pack_len += doc_len
 
+      self.shards_consumed += 1
       if self.cleanup:
         shard_path.unlink(missing_ok=True)
