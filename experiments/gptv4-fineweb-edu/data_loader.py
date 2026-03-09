@@ -27,6 +27,8 @@ class S3Sync():
   def _local_to_remote(self, local_path: Path | str) -> str:
     local_path = Path(local_path)
     rel = local_path.relative_to(self.local_path)
+    if str(rel) == ".":
+      return self.remote_path
     return f"{self.remote_path}/{rel}"
 
   def push(self, local_path: Path | str, dry_run=False) -> bool:
