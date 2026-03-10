@@ -3,6 +3,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
 # Version 4 - document masking, GQA
 
@@ -14,6 +15,7 @@ class GPTv4Config:
   n_heads: int = 8 # number of embedding heads (n_embed / n_heads MUST be an integer)
   n_embed: int = 288 # number of dimensions in embedding vector
   n_layers: int = 6 # number of blocks
+  n_kv_heads: int = 2
   rope_base: float = 10000.0
   logit_cap: float = 30.0
   checkpoint: bool = False
@@ -53,36 +55,46 @@ class RotaryPositionalEmbedding(nn.Module):
 class CausalSelfAttention(nn.Module):
   def __init__(self, config: GPTv4Config):
     super().__init__()
-    self.n_heads, self.n_embed = config.n_heads, config.n_embed
-    assert self.n_embed % self.n_heads == 0
-    self.qkv_block = nn.Linear(self.n_embed, 3 * self.n_embed)
-    self.proj = nn.Linear(config.n_embed, config.n_embed)
-    self.proj.__INIT_SCALAR__ = (2 * config.n_layers) ** -0.5
-    self.rope = RotaryPositionalEmbedding(config=config)
+    self.n_heads, self.n_kv_heads, self.n_embed = config.n_heads, config.n_kv_heads, config.n_embed
+    self.head_dim = config.n_embed // config.n_heads
 
-  def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None):
+    assert self.n_embed % self.n_heads == 0
+    assert self.n_heads % self.n_kv_heads == 0
+
+    self.q_proj = nn.Linear(config.n_embed, config.n_embed, bias=False)
+    self.kv_proj = nn.Linear(config.n_embed, 2 * (config.n_kv_heads * self.head_dim), bias=False)
+    self.rope = RotaryPositionalEmbedding(config=config)
+    self.proj = nn.Linear(config.n_embed, config.n_embed, bias=False)
+    self.q_proj.__INIT_SCALAR__ = pow((2 * config.n_layers), -0.5)
+    self.kv_proj.__INIT_SCALAR__ = pow((2 * config.n_layers), -0.5)
+    self.proj.__INIT_SCALAR__ = pow((2 * config.n_layers), -0.5)
+
+  def forward(self, x: torch.Tensor, block_mask = None):
     # get k,q,v linear block
     B, T, _ = x.size() # assuming C == self.n_embed
-    n_head_embed = self.n_embed // self.n_heads
-    qkv: torch.Tensor = self.qkv_block(x) # dimension (B, T, 3*C)
-    q_joined, k_joined, v_joined = qkv.split(self.n_embed, dim=-1)
-    # view must be (B, n_heads, T, n_head_embed) needed for scaled_dot_product_attention
-    q = q_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
-    k = k_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
+
+    q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+    kv = self.kv_proj(x).view(B, T, self.n_kv_heads, 2 * self.head_dim)
+    k, v = kv.split(self.head_dim, dim=-1)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
 
     q, k = self.rope(q, k)
-    v = v_joined.view(B, T, self.n_heads, n_head_embed).transpose(1, 2)
 
-    y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=attn_mask is None)
-    y_joined = y.transpose(1, 2).contiguous().view(B, T, self.n_embed)
-    return self.proj(y_joined)
+    if block_mask is not None and not isinstance(block_mask, torch.Tensor):
+      y = flex_attention(q, k, v, block_mask=block_mask, enable_gqa=True)
+    else:
+      # block_mask is either None (pure causal) or a bool (B,1,T,T) tensor (non-CUDA fallback)
+      y = F.scaled_dot_product_attention(q, k, v, attn_mask=block_mask, is_causal=block_mask is None, enable_gqa=True)
+    y = y.transpose(1, 2).contiguous().view(B, T, self.n_embed)
+    return self.proj(y)
 
 
 class MultiLayerPerceptron(nn.Module):
   def __init__(self, config: GPTv4Config):
     super().__init__()
-    self.l1 = nn.Linear(config.n_embed, 4*config.n_embed)
-    self.proj = nn.Linear(4*config.n_embed, config.n_embed)
+    self.l1 = nn.Linear(config.n_embed, 4*config.n_embed, bias=False)
+    self.proj = nn.Linear(4*config.n_embed, config.n_embed, bias=False)
     self.proj.__INIT_SCALAR__ = (2 * config.n_layers) ** -0.5
 
   def forward(self, x: torch.Tensor):
@@ -139,42 +151,52 @@ class LanguageModel(nn.Module):
     self.token_embed.weight = self.head.weight
 
   @staticmethod
-  def _build_doc_mask(doc_ids: torch.Tensor) -> torch.Tensor:
-    """Build causal + document-boundary attention mask from doc_ids.
+  def _build_flex_block_mask(doc_ids: torch.Tensor):
+    B, T = doc_ids.shape
 
-    doc_ids: (B, T) integer tensor where each position holds its document index.
-    Returns a boolean mask (B, 1, T, T) where True = attend, False = masked.
-    """
+    def causal_mask(b, h, q_idx, kv_idx):
+      causal = q_idx >= kv_idx
+      same_doc = doc_ids[b, q_idx] == doc_ids[b, kv_idx]
+      return causal & same_doc
+
+    return create_block_mask(
+      causal_mask,
+      B=B, H=None, Q_LEN=T, KV_LEN=T, device=doc_ids.device
+    )
+
+  @staticmethod
+  def _build_bool_mask(doc_ids: torch.Tensor) -> torch.Tensor:
+    """Causal + doc-boundary boolean mask — fallback for non-CUDA devices."""
     _, T = doc_ids.shape
-    # causal mask: position i can only see j <= i
     causal = torch.ones(T, T, dtype=torch.bool, device=doc_ids.device).tril()
-    # doc mask: position i can only see j with same doc_id
     doc = doc_ids.unsqueeze(2) == doc_ids.unsqueeze(1)  # (B, T, T)
-    mask = causal.unsqueeze(0) & doc  # (B, T, T)
-    return mask.unsqueeze(1)  # (B, 1, T, T)
+    return (causal.unsqueeze(0) & doc).unsqueeze(1)    # (B, 1, T, T)
 
-  def forward(self, 
-    idx: torch.Tensor, targets=None, 
-    doc_ids: Optional[torch.Tensor] = None, 
+  def forward(self,
+    idx: torch.Tensor, targets=None,
+    doc_ids: Optional[torch.Tensor] = None,
     loss_mask: Optional[torch.Tensor] = None
   ):
     _, T = idx.size() # number of batches, token sequence
     block_size = self.config.block_size
 
+    block_mask = None
+    if doc_ids is not None:
+      if doc_ids.device.type == "cuda":
+        block_mask = self._build_flex_block_mask(doc_ids)
+      else:
+        block_mask = self._build_bool_mask(doc_ids)
+
     idx: torch.Tensor = idx if T <= block_size else idx[:, -block_size:]
 
-    attn_mask = None
-    if doc_ids is not None:
-      attn_mask = self._build_doc_mask(doc_ids)
-
-    tok_e = self.token_embed(idx)
+    tok_e = self.token_embed(idx) * pow(self.config.n_embed, 0.5)
     x = tok_e
     if self.config.checkpoint:
       for block in self.blocks:
-        x = torch.utils.checkpoint.checkpoint(block, x, attn_mask)
+        x = torch.utils.checkpoint.checkpoint(block, x, block_mask)
     else:
       for block in self.blocks:
-        x = block(x, attn_mask)
+        x = block(x, block_mask)
     x = self.ln(x)
     
     if targets is None: x = x[:, [-1], :]
@@ -184,7 +206,7 @@ class LanguageModel(nn.Module):
     if targets is None: return logits, None
     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
     if loss_mask is not None:
-      loss = (loss * loss_mask.view(-1)).sum() / loss_mask.sum().clamp(min=1)
+      loss = (loss * loss_mask.view(-1).float()).sum() / loss_mask.sum().clamp(min=1)
     else:
       loss = loss.mean()
     return logits, loss
