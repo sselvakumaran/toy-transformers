@@ -5,7 +5,7 @@
 /artifacts
 /.vscode
 **/.DS_Store
-experiments/*/checkpoints/
-experiments/*/data
+experiments/**/checkpoints/
+experiments/**/data
 *.pyc
 !**/__pycache__/
