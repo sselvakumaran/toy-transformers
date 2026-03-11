@@ -1,7 +1,6 @@
 /venv
 /.cache
 /data
-/runs
 /artifacts
 /.vscode
 **/.DS_Store
