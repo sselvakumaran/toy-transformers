@@ -17,29 +17,28 @@ _ERROR_KEY = "__error__"
 @dataclass
 class S3Sync():
   # wrapper for syncing files between local and S3
-  remote_path: str # something like "s3://BUCKET_NAME/**/toy-transformers/"
-  local_path: str | Path
+  remote_base: str # something like "s3://BUCKET_NAME/**/toy-transformers/"
+  local_root: str | Path
 
   def __post_init__(self):
-    self.local_path = Path(self.local_path)
-    self.remote_path = self.remote_path.rstrip("/")
+    self.local_root = Path(self.local_root)
+    self.remote_base = self.remote_base.rstrip("/")
+    assert self.remote_base.startswith("s3://")
 
-  def _local_to_remote(self, local_path: Path | str) -> str:
-    local_path = Path(local_path)
-    rel = local_path.relative_to(self.local_path)
-    if str(rel) == ".":
-      return self.remote_path
-    return f"{self.remote_path}/{rel}"
+  def _remote(self, rel: str | Path) -> str:
+    return f"{self.remote_base}/{Path(rel).as_posix()}"
+  
+  def _local(self, rel: str | Path) -> Path:
+    return self.local_root / rel
 
-  def push(self, local_path: Path | str, dry_run=False) -> bool:
-    local_path = Path(local_path)
-    remote = self._local_to_remote(local_path)
+  def push(self, rel: str | Path, dry_run = False) -> bool:
+    local, remote = self._local(rel), self._remote(rel)
     cmd = ["aws", "s3",
-      "cp" if local_path.is_file() else "sync",
-      str(local_path), str(remote)
+      "cp" if local.is_file() else "sync",
+      str(local), str(remote)
     ]
     if dry_run:
-      print("dry-run: " + " ".join(cmd))
+      print("dry-run:", " ".join(cmd))
       return True
     
     r = subprocess.run(cmd, check=False, capture_output=True, text=True)
@@ -47,37 +46,36 @@ class S3Sync():
       print(f"push failed: {r.stderr}")
     return r.returncode == 0
   
-  def pull(self, local_path: Path | str, is_file: bool = False, dry_run=False) -> bool:
-    local_path = Path(local_path)
-    remote = self._local_to_remote(local_path)
-    use_cp = is_file or (local_path.suffix != "")
+  def pull(self, rel: str | Path, dry_run=False) -> bool:
+    local, remote = self._local(rel), self._remote(rel)
+    use_cp = local.suffix != ""
     cmd = ["aws", "s3",
       "cp" if use_cp else "sync", 
-      str(remote), str(local_path)
+      str(remote), str(local)
     ]
     if dry_run:
-      print("dry-run: " + " ".join(cmd))
+      print("dry-run: ", " ".join(cmd))
       return True
     
-    local_path.parent.mkdir(parents=True, exist_ok=True)
+    local.parent.mkdir(parents=True, exist_ok=True)
     r = subprocess.run(cmd, check=False, capture_output=True, text=True)
     if r.returncode != 0:
       print(f"pull failed: {r.stderr}")
     return r.returncode == 0
 
-  def pull_atomic(self, local_path: Path | str, retries: int = 2) -> Path:
-    local_path = Path(local_path)
-    if local_path.exists():
-      return local_path
+  def pull_atomic(self, rel: str | Path, retries: int = 2) -> Path:
+    local = self._local(rel)
+    if local.exists():
+      return local
 
-    remote = self._local_to_remote(local_path)
-    tmp = local_path.with_suffix(".tmp")
-    local_path.parent.mkdir(parents=True, exist_ok=True)
+    remote = self._remote(rel)
+    tmp = remote.with_suffix(".tmp")
+    local.parent.mkdir(parents=True, exist_ok=True)
 
     try:
       for attempt in range(retries):
         r = subprocess.run(
-          ["aws", "s3", "cp", str(remote), str(tmp)],
+          ["aws", "s3", "cp", remote, str(tmp)],
           check=False, capture_output=True, text=True,
         )
         if r.returncode == 0:
@@ -88,22 +86,21 @@ class S3Sync():
           raise RuntimeError(
             f"aws s3 cp failed for {remote} (exit {r.returncode}): {r.stderr}"
           )
-      tmp.rename(local_path)
-      return local_path
+      tmp.rename(local)
+      return local
     except Exception as e:
       if tmp.exists():
         tmp.unlink()
       raise e
-  def exists(self, local_path: Path | str) -> bool:
-    remote = self._local_to_remote(local_path)
-    if Path(local_path).is_dir() and not remote.endswith("/"):
-      remote += "/"
+  
+  def exists(self, rel: str | Path) -> bool:
+    remote = self._remote(rel)
     cmd = ["aws", "s3", "ls", remote]
     r = subprocess.run(cmd, check=False, capture_output=True)
     return r.returncode == 0
 
-  def ls(self, local_path: Path | str) -> list[str]:
-    remote = self._local_to_remote(local_path)
+  def ls(self, rel: str | Path) -> list[str]:
+    remote = self._remote(rel)
     if not remote.endswith("/"):
       remote += "/"
     r = subprocess.run(
@@ -149,8 +146,8 @@ class S3ShardDownloader(mp.Process):
     **kwargs,
   ) -> "S3ShardDownloader":
     data_sync = S3Sync(
-      remote_path=remote_prefix,
-      local_path=local_dir,
+      remote_base=remote_prefix,
+      local_root=local_dir,
     )
     return cls(
       sync=data_sync,
