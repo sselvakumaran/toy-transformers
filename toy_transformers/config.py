@@ -95,9 +95,7 @@ class TrainingConfig:
 	class TokensConfig:
 		batch_size: int
 		grad_accum_steps: int
-		num_epochs: int = 1
-		total_steps: int = 0
-
+		train_tokens: 1_000_000_000
 
 	@dataclass
 	class EvalConfig:

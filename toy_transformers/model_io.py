@@ -26,17 +26,18 @@ def save_model(
 def load_model(
 	path: str | Path,
 	cfg: TrainingConfig,
+	model=None,
 	device: str = "cuda"
 ):
 	path = Path(path)
 	ckpt = torch.load(path / "model.pt", map_location=device, weights_only=True)
-	model = cfg.model.build_model(
-		vocab_size=cfg.tokenizer.vocab_size,
-		device=device
-	)
+	if model is None:
+		model = cfg.model.build_model(
+			vocab_size=cfg.tokenizer.vocab_size,
+			device=device
+		)
 
 	model.load_state_dict(ckpt["model"])
-
 	return model, ckpt.get("optimizer"), ckpt.get("scheduler")
 
 
