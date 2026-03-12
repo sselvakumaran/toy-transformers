@@ -125,7 +125,7 @@ class TrainingConfig:
 			optimizer=cls.OptimizerConfig(**raw.get("optimizer", {})),
 			tokenizer=cls.TokenizerConfig(**raw.get("tokenizer", {})),
 			tokens=cls.TokensConfig(**raw.get("tokens", {})),
-			eval=cls.EvalConfig(**raw.get("train", {})),
+			eval=cls.EvalConfig(**raw.get("eval", {})),
 		)
 
 	def to_json(self, path: str | Path):

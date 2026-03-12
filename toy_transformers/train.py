@@ -62,7 +62,6 @@ def maybe_resume(run_dir: Path, model, optimizer, scheduler, device: str) -> Run
 
 @torch.no_grad()
 def estimate_loss(model, loader, n_batches: int, device: str) -> float:
-	model.eval()
 	losses = []
 	for i, (x, y, doc_ids, loss_mask) in enumerate(loader):
 		if i >= n_batches: break
@@ -71,7 +70,6 @@ def estimate_loss(model, loader, n_batches: int, device: str) -> float:
 		with torch.autocast(device_type=device, dtype=torch.bfloat16):
 			_, loss = model(x, y, doc_ids=doc_ids, loss_mask=loss_mask)
 		losses.append(loss.item())
-	model.train()
 	return sum(losses) / len(losses) if losses else float("inf")
 
 def train(
@@ -235,11 +233,11 @@ def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 		shard_paths=[val_path],
 		block_size=block_size,
 		bos_id=cfg.tokenizer.bos_id, pad_id=cfg.tokenizer.pad_id,
-		shuffle=False, seed=cfg.run.seed
+		shuffle=False, seed=cfg.run.seed,
 	)
 
 	train_loader = DataLoader(train_dataset, batch_size=cfg.tokens.batch_size, num_workers=0)
-	val_loader = DataLoader(val_dataset, batch_size=cfg.tokens.batch_size, num_workers=0)
+	val_loader = DataLoader(val_dataset, batch_size=cfg.tokens.batch_size, num_workers=0, drop_last=True)
 
 	train(
 		cfg, model, optimizer, scheduler,

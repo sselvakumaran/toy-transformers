@@ -176,7 +176,6 @@ def _make_sample(pack: list[np.ndarray],
   block_size: int, 
   bos_id: int, pad_id: int
 ):
-  print(pack, block_size, bos_id, pad_id)
   x_np = np.full(block_size, pad_id, dtype=np.uint16)
   y_np = np.full(block_size, pad_id, dtype=np.uint16)
   tokens = np.concatenate(pack)
