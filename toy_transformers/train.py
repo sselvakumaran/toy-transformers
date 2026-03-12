@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from toy_transformers.config import TrainingConfig
-from toy_transformers.data import S3Sync, S3ShardDownloader, ShardedTokenDataset
+from toy_transformers.data import S3Sync, S3ShardDownloader, AggregateDataset, ShardDataset
 from toy_transformers.model_io import MetricsWriter, RunStatus, load_model, save_model
 
 
@@ -24,11 +24,11 @@ def setup_data(cfg: TrainingConfig, sync: S3Sync) -> tuple[dict, Path]:
 	for folder in cfg.dataset.dataset_folders:
 		path = sync.pull_atomic(f"data/datasets/{folder}/metadata.json")
 		metadatas[folder] = json.loads(path.read_text())
-		print("[DATA]", f"{folder}: {len(metadatas[folder]['train_shards'])} training shards")
+		print("[SETUP]", f"{folder}: {len(metadatas[folder]['train_shards'])} training shards")
 	
 	primary = cfg.dataset.dataset_folders[0]
 	val_name = metadatas[primary]["val_shard"]
-	print("[DATA]", "pulling val shard...")
+	print("[SETUP]", "pulling val shard...")
 	val_path = sync.pull_atomic(f"data/datasets/{primary}/{val_name}")
 	return metadatas, val_path
 
@@ -40,7 +40,7 @@ def compute_total_steps(cfg: TrainingConfig) -> int:
 def setup_model(cfg: TrainingConfig, total_steps: int, device: str):
 	torch.set_float32_matmul_precision("medium")
 	model = cfg.model.build_model(vocab_size=cfg.tokenizer.vocab_size, device=device)
-	print("[MODEL]", f"{model.get_num_parameters(as_str=True)} parameters")
+	print("[SETUP]", f"{model.get_num_parameters(as_str=True)} parameters")
 	model.compile()
 	optimizer = cfg.optimizer.build_optimizer(model)
 	scheduler = cfg.optimizer.build_scheduler(optimizer, total_steps)
@@ -51,13 +51,10 @@ def maybe_resume(run_dir: Path, model, optimizer, scheduler, device: str) -> Run
 	status = RunStatus.load(run_dir)
 
 	if temp_ckpt.exists() and status.step > 0:
-		print("[RESUME]", f"step={status.step}, shards_consumed={status.shards_consumed}")
-		_, opt_state, sched_state = load_model(temp_ckpt, cfg, model=model, device=device)
-		ckpt = load_model(temp_ckpt, )
-		if opt_state: optimizer.load_state_dict(opt_state)
-		if sched_state: scheduler.load_state_dict(sched_state)
+		print("[SETUP]", f"resuming, step={status.step}, shards_consumed={status.shards_consumed}")
+		load_model(temp_ckpt, cfg, model=model, optimizer=optimizer, scheduler=scheduler, device=device)
 	else:
-		print("[TRAIN]", "starting fresh")
+		print("[SETUP]", "starting fresh")
 		status = RunStatus()
 	
 	return status
@@ -99,7 +96,8 @@ def train(
 	
 	def stop_downloaders():
 		for d in downloaders:
-			d.terminate()
+			d.join(timeout=3)
+			if d.is_alive(): d.terminate()
 	
 	step = status.step
 	micro_buffer = []
@@ -162,40 +160,99 @@ def train(
 			
 			# checkpoint
 			if step % cfg.run.save_interval == 0:
-				status.update(run_dir, step=step, shards_consumed=train_loader.dataset.shards_consumed)
+				status.update(
+					run_dir, step=step, shards_consumed=train_loader.dataset.shards_consumed,
+					dataset_shards={
+						folder: train_loader.dataset.source_shards_consumed[i]
+						for i, folder in enumerate(cfg.dataset.dataset_folders)
+					})
 				save_checkpoint(f"step-{step}")
 			
 			if step >= total_steps: break
 	
 	except KeyboardInterrupt:
 		print("[CLEANUP]", f"interrupted at step {step}")
-		status.update(run_dir, step=step, shards_consumed=train_loader.dataset.shards_consumed, status="running")
+		status.update(run_dir, step=step, shards_consumed=train_loader.dataset.shards_consumed, status="running", 
+			dataset_shards={
+				folder: train_loader.dataset.source_shards_consumed[i]
+				for i, folder in enumerate(cfg.dataset.dataset_folders)
+		})
 		save_checkpoint("temp")
+		metrics.close()
 		stop_downloaders()
 		return
 	
 	metrics.close()
-
-	for d in downloaders:
-		d.join(timeout=5)
-		if d.is_alive(): d.terminate()
+	stop_downloaders()
 	
-	status.update(run_dir, step=step, shards_consumed=train_loader.dataset.shards_consumed, status="completed")
+	status.update(run_dir, step=step, shards_consumed=train_loader.dataset.shards_consumed, status="completed",
+		dataset_shards={
+			folder: train_loader.dataset.source_shards_consumed[i]
+			for i, folder in enumerate(cfg.dataset.dataset_folders)
+	})
 	save_checkpoint(f"final")
 	print("[TRAIN]", "finished!")
 
 
-def train_from_config(cfg: Path, bucket: str, device: str = "cuda"):
-	pass
+def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
+	run_dir = RUNS_DIR / cfg.run.name
+	run_dir.mkdir(parents=True, exist_ok=True)
+	# cfg.to_json(run_dir / "config.json")
+	
+	sync = S3Sync(remote_base=f"s3://{bucket}/toy-transformers", local_root=REPO_ROOT)
+	print("[SETUP]", f"connected {sync.remote_base} <-> {REPO_ROOT}")
+	
+	metadatas, val_path = setup_data(cfg, sync)
+	total_steps = compute_total_steps(cfg)
+	
+	model, optimizer, scheduler = setup_model(cfg, total_steps, device)
+	status = maybe_resume(run_dir, model, optimizer, scheduler, device)
+
+	downloaders = []
+	sources = []
+	for folder, w in zip(cfg.dataset.dataset_folders, cfg.dataset.dataset_weights):
+		shards = [f"data/datasets/{folder}/{s}" for s in metadatas[folder]["train_shards"]]
+		q = mp.Queue(maxsize=4)
+		sources.append((q, w))
+		skip = status.dataset_shards.get(folder, 0)
+		downloader = S3ShardDownloader(
+			sync=sync, shards=shards,
+			queue=q,
+			shuffle=True, seed=cfg.run.seed,
+			skip_shards=skip
+		)
+		downloader.start()
+		downloaders.append(downloader)
+	
+	block_size = cfg.model.config["block_size"]
+	train_dataset = AggregateDataset(
+		sources=sources,
+		block_size=block_size,
+		bos_id=cfg.tokenizer.bos_id, pad_id=cfg.tokenizer.pad_id,
+		shuffle_docs=True, seed=cfg.run.seed,
+	)
+	val_dataset = ShardDataset(
+		shard_paths=[val_path],
+		block_size=block_size,
+		bos_id=cfg.tokenizer.bos_id, pad_id=cfg.tokenizer.pad_id,
+		shuffle=False, seed=cfg.run.seed
+	)
+
+	train_loader = DataLoader(train_dataset, batch_size=cfg.tokens.batch_size, num_workers=0)
+	val_loader = DataLoader(val_dataset, batch_size=cfg.tokens.batch_size, num_workers=0)
+
+	train(
+		cfg, model, optimizer, scheduler,
+		train_loader, val_loader, total_steps, status,
+		run_dir, sync, downloaders, device
+	)
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser()
 	parser.add_argument("config", help="path to config JSON")
-	parser.add_argument("bucket", "S3 bucket/base name, can include subdirectories")
+	parser.add_argument("bucket", help="S3 bucket/base name, can include subdirectories")
 	parser.add_argument("--device", default="cuda")
 	args = parser.parse_args()
 	
-	cfg = Path(args.config)
-	assert cfg.exists()
-
+	cfg = TrainingConfig.from_json(args.config)
 	train_from_config(cfg=cfg, bucket=args.bucket, device=args.device)

@@ -176,6 +176,7 @@ def _make_sample(pack: list[np.ndarray],
   block_size: int, 
   bos_id: int, pad_id: int
 ):
+  print(pack, block_size, bos_id, pad_id)
   x_np = np.full(block_size, pad_id, dtype=np.uint16)
   y_np = np.full(block_size, pad_id, dtype=np.uint16)
   tokens = np.concatenate(pack)
@@ -244,6 +245,7 @@ class AggregateDataset(IterableDataset):
     self.seed = seed
     self.cleanup = cleanup
     self.shards_consumed = 0
+    self.source_shards_consumed = [0 for _ in range(len(queues))]
 
   def __iter__(self):
     rng = random.Random(self.seed)
@@ -260,6 +262,7 @@ class AggregateDataset(IterableDataset):
           if self.cleanup and open_paths[src] is not None:
             open_paths[src].unlink(missing_ok=True)
           self.shards_consumed += 1
+          self.source_shards_consumed[src] += 1
         item = self.queues[src].get()
         if isinstance(item, dict) and _ERROR_KEY in item:
           raise RuntimeError(f"downloader error (source {src}): {item[_ERROR_KEY]}")

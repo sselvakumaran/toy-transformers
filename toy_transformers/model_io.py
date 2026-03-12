@@ -1,6 +1,6 @@
 import json
 import torch
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
 from toy_transformers.config import TrainingConfig
@@ -26,22 +26,15 @@ def save_model(
 def load_model(
 	path: str | Path,
 	cfg: TrainingConfig,
-	model=None,
+	model, optimizer = None, scheduler = None, 
 	vocab_size: int | None = None,
 	device: str = "cuda"
 ):
 	path = Path(path)
 	ckpt = torch.load(path / "model.pt", map_location=device, weights_only=True)
-	if model is None:
-		vs = vocab_size or cfg.tokenizer.vocab_size
-		if not vs:
-			raise ValueError("loading model requires vocab_size")
-		model = cfg.model.build_model(
-			vocab_size=cfg.tokenizer.vocab_size,
-			device=device
-		)
 	model.load_state_dict(ckpt["model"])
-	return model, ckpt.get("optimizer"), ckpt.get("scheduler")
+	if optimizer: optimizer.load_state_dict(ckpt["optimizer"])
+	if scheduler: scheduler.load_state_dict(ckpt["scheduler"])
 
 
 # --- SAVING / LOADING STATUS ---
@@ -53,6 +46,7 @@ class RunStatus:
 	shards_consumed: int = 0
 	best_val_loss: float = float("inf")
 	status: str = "running"
+	dataset_shards: dict = field(default_factory=dict)
 
 	@classmethod
 	def load(cls, run_dir: Path | str):
@@ -72,13 +66,14 @@ class RunStatus:
 		step: int | None = None, 
 		shards_consumed: int | None = None, 
 		best_val_loss: float | None = None, 
-		status: str | None = None
+		status: str | None = None,
+		dataset_shards: dict | None = None
 	):
 		if step is not None: self.step = step
 		if shards_consumed is not None: self.shards_consumed = shards_consumed
 		if best_val_loss is not None: self.best_val_loss = best_val_loss
 		if status is not None: self.status = status
-
+		if dataset_shards is not None: self.dataset_shards = dataset_shards
 		self.save(run_dir)
 
 
