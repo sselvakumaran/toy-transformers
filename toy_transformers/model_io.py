@@ -27,16 +27,19 @@ def load_model(
 	path: str | Path,
 	cfg: TrainingConfig,
 	model=None,
+	vocab_size: int | None = None,
 	device: str = "cuda"
 ):
 	path = Path(path)
 	ckpt = torch.load(path / "model.pt", map_location=device, weights_only=True)
 	if model is None:
+		vs = vocab_size or cfg.tokenizer.vocab_size
+		if not vs:
+			raise ValueError("loading model requires vocab_size")
 		model = cfg.model.build_model(
 			vocab_size=cfg.tokenizer.vocab_size,
 			device=device
 		)
-
 	model.load_state_dict(ckpt["model"])
 	return model, ckpt.get("optimizer"), ckpt.get("scheduler")
 
@@ -63,6 +66,20 @@ class RunStatus:
 		path = Path(run_dir) / _STATUS_FN
 		path.parent.mkdir(parents=True, exist_ok=True)
 		path.write_text(json.dumps(asdict(self), indent=2))
+	
+	def update(self, 
+		run_dir: Path | str, 
+		step: int | None = None, 
+		shards_consumed: int | None = None, 
+		best_val_loss: float | None = None, 
+		status: str | None = None
+	):
+		if step is not None: self.step = step
+		if shards_consumed is not None: self.shards_consumed = shards_consumed
+		if best_val_loss is not None: self.best_val_loss = best_val_loss
+		if status is not None: self.status = status
+
+		self.save(run_dir)
 
 
 # --- SAVING / LOADING METRICS ---

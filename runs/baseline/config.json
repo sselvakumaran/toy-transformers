@@ -1,0 +1,40 @@
+{
+	"run": {
+		"name": "0-baseline",
+		"log_interval": 10,
+		"save_interval": 5000,
+		"seed": 42
+	},
+	"dataset": {
+		"dataset_folders": ["fineweb-edu-sample-10B"],
+		"dataset_weights": [1.0]
+	},
+	"model": {
+		"model": "gptv4",
+		"config": {
+			"block_size": 1024,
+			"n_heads": 12,
+			"n_embed": 768,
+			"n_layers": 12,
+			"n_kv_heads": 4
+		}
+	},
+	"optimizer": {
+		"schedule": "cosine",
+		"min_lr": 0.00003,
+		"max_lr": 0.0003,
+		"warmup_steps": 1000
+	},
+	"tokenizer": {
+		"path": "data/vocabs/vocab_32k.json"
+	},
+	"tokens": {
+		"batch_size": 16,
+		"grad_accum_steps": 4,
+		"train_tokens": 1500000000
+	},
+	"eval": {
+		"interval": 500,
+		"batches": 20
+	}
+}

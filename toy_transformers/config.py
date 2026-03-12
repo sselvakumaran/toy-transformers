@@ -110,6 +110,11 @@ class TrainingConfig:
 	tokens: TokensConfig
 	eval: EvalConfig
 
+	@property
+	def tokens_per_step(self):
+		return self.tokens.batch_size * self.tokens.grad_accum_steps \
+			* self.model.config["block_size"]
+
 	@classmethod
 	def from_json(cls, path: str | Path):
 		raw = json.loads(Path(path).read_text())

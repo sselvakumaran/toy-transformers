@@ -169,7 +169,7 @@ def _iter_docs(
   for start, end in boundaries:
     doc = tokens[start:end]
     if len(doc) > max_doc_len:
-      doc = doc[max_doc_len]
+      doc = doc[:max_doc_len]
     yield doc
 
 def _make_sample(pack: list[np.ndarray], 
@@ -250,7 +250,7 @@ class AggregateDataset(IterableDataset):
     n_sources = len(self.queues)
     doc_iters = [None for _ in range(n_sources)]
     open_paths: list[Path | None] = [None for _ in range(n_sources)]
-    shard_counters = [None for _ in range(n_sources)]
+    shard_counters = [0 for _ in range(n_sources)]
 
     def next_doc(src: int) -> np.ndarray:
       while True:
