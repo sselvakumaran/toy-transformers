@@ -516,8 +516,9 @@ def shuffle_shards(
   input_dir: Path,
   output_dir: Path,
   seed: int = 42,
+  n_output_shards: Optional[int] = None,
   read_chunk_tokens: int = 1_000_000,
-  write_buffer_tokens: int = 1_000_000,   
+  write_buffer_tokens: int = 1_000_000,
 ):
   from tqdm import tqdm
 
@@ -529,7 +530,7 @@ def shuffle_shards(
     meta = json.load(f)
   split_id = meta.get("split_id", 0)
   shard_names: list[str] = sorted(meta["shard_tokens"].keys())
-  num_shards = meta.get("num_shards", 1)
+  num_shards = n_output_shards or meta.get("num_shards", 1) 
 
   rng = random.Random(seed)
 
