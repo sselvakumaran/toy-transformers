@@ -2,6 +2,7 @@ from dataclasses import dataclass, field, asdict
 import json
 from pathlib import Path
 import torch
+from toy_transformers.tokenization import Vocabulary
 
 @dataclass
 class TrainingConfig:
@@ -84,11 +85,12 @@ class TrainingConfig:
 		pad_id: int = field(init=False)
 
 		def load(self, local_root: Path):
-			vocab_path = local_root / self.path
-			raw = json.loads(vocab_path.read_text())
-			self.vocab_size = raw["vocab_size"]
-			self.bos_id = raw.get("bos_id", -1)
-			self.pad_id = raw.get("pad_id", -1)
+			vocab = Vocabulary.load(local_root / self.path)
+			self.vocab_size = len(vocab)
+			special_tokens = vocab.config.special_tokens
+			# TODO: clean up w/ vocabulary
+			self.bos_id = vocab.token_to_idx[special_tokens[0]]
+			self.pad_id = vocab.token_to_idx[special_tokens[1]] if len(special_tokens) > 1 else -1
 
 
 	@dataclass
