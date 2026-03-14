@@ -182,20 +182,21 @@ def run_tokenize(
 	mark_phase_done(dataset_dir, status, "tokenize")
 
 def run_shuffle(
-	encoded_dir: Path, 
+	encoded_dir: Path,
 	shuffled_dir: Path,
 	status: dict,
 	dataset_dir: Path,
 	n_output_shards: Optional[int] = None,
+	val_shards: int = 1,
 	seed: int = 42
 ):
 	if phase_done(status, "shuffle"):
 		print("[SHUFFLE]", "already complete, skipping")
 		return
-	
+
 	with open(encoded_dir / "metadata.json") as f:
 		old_meta = json.load(f)
-	
+
 	n_encoded = old_meta["num_shards"]
 	n_out = n_output_shards or n_encoded
 	shuffled_dir.mkdir(parents=True, exist_ok=True)
@@ -203,7 +204,8 @@ def run_shuffle(
 		input_dir=encoded_dir,
 		output_dir=shuffled_dir,
 		seed=seed,
-		n_output_shards=n_out
+		n_output_shards=n_out,
+		val_shards=val_shards,
 	)
 
 	print("[SHUFFLE]", "complete")
@@ -217,11 +219,11 @@ def run_verify(shuffled_dir: Path, vocab_path: Path, bos_token: str):
 	with open(shuffled_dir / "metadata.json") as f:
 		meta = json.load(f)
 
-	for shard_name in list(meta["shard_tokens"].keys())[:3]:
+	for shard_name in list(meta["token_counts"].keys())[:3]:
 		path = shuffled_dir / shard_name
 		raw = np.frombuffer(path.read_bytes(), dtype=np.uint16)
 		bos_count = int((raw == bos_id).sum())
-		expected_tokens = meta["shard_tokens"][shard_name]
+		expected_tokens = meta["token_counts"][shard_name]
 		print("[VERIFY]", f"{shard_name}: {len(raw):,} tokens (expected {expected_tokens:,}), {bos_count:,} docs")
 		decoded = vocab.decode(raw[:200].tolist())
 		text = b"".join(decoded).decode("utf-8", errors="replace")
@@ -331,6 +333,7 @@ def main():
 		encoded_dir=encoded_dir,
 		shuffled_dir=shuffled_dir,
 		n_output_shards=args.n_output_shards,
+		val_shards=args.val_shards,
 		status=status,
 		dataset_dir=dataset_dir,
 		seed=args.seed
@@ -339,7 +342,7 @@ def main():
 	if args.verify: run_verify(
 		shuffled_dir=shuffled_dir,
 		vocab_path=vocab_path,
-		bos_str=args.bos_token
+		bos_token=args.bos_token
 	)
 		
 	if args.s3_remote: run_upload(
