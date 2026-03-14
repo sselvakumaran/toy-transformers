@@ -505,7 +505,7 @@ def bulk_encode(
     "num_shards": shard_idx,
     "vocab_path": str(vocab_path),
     "split_id": split_id,
-    "shard_tokens": {
+    "token_counts": {
       f"shard_{i:04d}.bin": int(count) for i, count in enumerate(shard_token_counts)
     }
   }
@@ -516,8 +516,10 @@ def shuffle_shards(
   input_dir: Path,
   output_dir: Path,
   seed: int = 42,
+  n_output_shards: Optional[int] = None,
+  val_shards: int = 1,
   read_chunk_tokens: int = 1_000_000,
-  write_buffer_tokens: int = 1_000_000,   
+  write_buffer_tokens: int = 1_000_000,
 ):
   from tqdm import tqdm
 
@@ -528,8 +530,8 @@ def shuffle_shards(
   with open(input_dir / "metadata.json", "r") as f:
     meta = json.load(f)
   split_id = meta.get("split_id", 0)
-  shard_names: list[str] = sorted(meta["shard_tokens"].keys())
-  num_shards = meta.get("num_shards", 1)
+  shard_names: list[str] = sorted(meta["token_counts"].keys())
+  num_shards = n_output_shards or meta.get("num_shards", 1) 
 
   rng = random.Random(seed)
 
@@ -605,16 +607,21 @@ def shuffle_shards(
   
   pbar.close()
 
+  all_shard_names = [f"shard_{i:04d}.bin" for i in range(num_shards)]
+  val_shard_names = all_shard_names[num_shards - val_shards:]
+  train_shard_names = all_shard_names[:num_shards - val_shards]
+
   out_meta = {
     "num_shards": num_shards,
     "vocab_path": meta.get("vocab_path"),
     "split_id": split_id,
     "shuffled": True,
     "seed": seed,
-    "shard_tokens": {
+    "train_shards": train_shard_names,
+    "val_shard": val_shard_names[0],
+    "token_counts": {
       f"shard_{i:04d}.bin": int(out_token_counts[i]) for i in range(num_shards)
     }
   }
   with open(output_dir / "metadata.json", 'w') as f:
     json.dump(out_meta, f, indent=2)
-  
