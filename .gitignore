@@ -8,3 +8,4 @@ experiments/**/checkpoints/
 experiments/**/data
 *.pyc
 !**/__pycache__/
+.env
