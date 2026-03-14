@@ -19,7 +19,7 @@ DATA_DIR = REPO_ROOT / "data"
 
 def setup_data(cfg: TrainingConfig, sync: S3Sync) -> tuple[dict, Path]:
 	sync.pull_atomic(cfg.tokenizer.path)
-	cfg.tokenizer.load(DATA_DIR)
+	cfg.tokenizer.load(REPO_ROOT)
 
 	metadatas = dict()
 	for folder in cfg.dataset.dataset_folders:

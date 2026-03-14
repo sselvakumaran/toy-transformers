@@ -30,7 +30,7 @@
     "adam_eps": 1e-8
   },
   "tokenizer": {
-    "path": "vocabs/vocab_fineweb-edu_32768.json"
+    "path": "data/vocabs/vocab_fineweb-edu_32768.json"
   },
   "tokens": {
     "batch_size": 16,
