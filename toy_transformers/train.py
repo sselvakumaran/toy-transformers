@@ -18,6 +18,7 @@ DATA_DIR = REPO_ROOT / "data"
 
 
 def setup_data(cfg: TrainingConfig, sync: S3Sync) -> tuple[dict, Path]:
+	sync.pull_atomic(cfg.tokenizer.path)
 	cfg.tokenizer.load(DATA_DIR)
 
 	metadatas = dict()
@@ -46,7 +47,7 @@ def setup_model(cfg: TrainingConfig, total_steps: int, device: str):
 	scheduler = cfg.optimizer.build_scheduler(optimizer, total_steps)
 	return model, optimizer, scheduler
 
-def maybe_resume(run_dir: Path, model, optimizer, scheduler, device: str) -> RunStatus:
+def maybe_resume(run_dir: Path, cfg, model, optimizer, scheduler, device: str) -> RunStatus:
 	temp_ckpt = run_dir / "checkpoints/temp"
 	status = RunStatus.load(run_dir)
 
@@ -204,7 +205,7 @@ def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 	total_steps = compute_total_steps(cfg)
 	
 	model, optimizer, scheduler = setup_model(cfg, total_steps, device)
-	status = maybe_resume(run_dir, model, optimizer, scheduler, device)
+	status = maybe_resume(run_dir, cfg, model, optimizer, scheduler, device)
 
 	downloaders = []
 	sources = []
