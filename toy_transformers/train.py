@@ -134,6 +134,7 @@ def train(
 					"step": step, "t_loss": round(loss_accum, 6),
 					"lr": lr, "tokens": step * cfg.tokens_per_step
 				})
+				metrics.flush()
 				print("[TRAIN]", " | ".join([
 					f"step {step:5d}/{total_steps}",
 					f"loss {loss_accum:.4f}",
@@ -153,6 +154,7 @@ def train(
 					"tokens": step * cfg.tokens_per_step
 				})
 				metrics.flush()
+				sync.push(f"runs/{cfg.run.name}/metrics.jsonl")
 				if is_best:
 					status.update(run_dir, best_val_loss=min(val_loss, status.best_val_loss))
 				t0 = time.time()
@@ -178,6 +180,8 @@ def train(
 		})
 		save_checkpoint("temp")
 		metrics.close()
+		sync.push(f"runs/{cfg.run.name}/metrics.jsonl")
+		sync.push(f"runs/{cfg.run.name}/status.json")
 		stop_downloaders()
 		return
 	
