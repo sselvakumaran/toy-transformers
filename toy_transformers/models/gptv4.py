@@ -151,6 +151,7 @@ class LanguageModel(nn.Module):
     self.token_embed.weight = self.head.weight
 
   @staticmethod
+  @torch.compiler.disable
   def _build_flex_block_mask(doc_ids: torch.Tensor):
     B, T = doc_ids.shape
 
