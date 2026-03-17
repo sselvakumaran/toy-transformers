@@ -1,7 +1,6 @@
 /venv
 /.cache
 /data
-/runs
 /artifacts
 /.vscode
 **/.DS_Store
@@ -9,3 +8,4 @@ experiments/**/checkpoints/
 experiments/**/data
 *.pyc
 !**/__pycache__/
+.env

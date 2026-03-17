@@ -108,12 +108,12 @@ def estimate_loss(model, loader, n_batches=EVAL_BATCHES):
 
 def main():
   data_sync = S3Sync(
-    remote_path=f"{S3_BASE}/data/shuffled",
-    local_path=SHARD_DIR,
+    remote_base=f"{S3_BASE}/data/shuffled",
+    local_root=SHARD_DIR,
   )
   ckpt_sync = S3Sync(
-    remote_path=f"{S3_BASE}/checkpoints",
-    local_path=CKPT_DIR,
+    remote_base=f"{S3_BASE}/checkpoints",
+    local_root=CKPT_DIR,
   )
 
   # pull val shard upfront

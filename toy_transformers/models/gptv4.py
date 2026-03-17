@@ -35,21 +35,29 @@ class RotaryPositionalEmbedding(nn.Module):
     t = torch.arange(max_seq_len, dtype=torch.float32)
     angles = torch.outer(t, thetas)
 
-    freqs_cis = torch.polar(torch.ones_like(angles), angles)
-    self.register_buffer("freqs_cis", freqs_cis)
+    self.register_buffer("cos", angles.cos())
+    self.register_buffer("sin", angles.sin())
 
   def forward(self, q: torch.Tensor, k: torch.Tensor):
     # q, k ~ (B, n_heads, T, head_dim)
     _, _, T, _ = q.shape
-    freqs = self.freqs_cis[:T].view(1, 1, T, -1)
 
-    q_complex = torch.view_as_complex(q.float().reshape(*q.shape[:-1], -1, 2))
-    k_complex = torch.view_as_complex(k.float().reshape(*k.shape[:-1], -1, 2))
+    cos = self.cos[:T].view(1, 1, T, -1)
+    sin = self.sin[:T].view(1, 1, T, -1)
 
-    q_rotated = torch.view_as_real(q_complex * freqs).flatten(-2)
-    k_rotated = torch.view_as_real(k_complex * freqs).flatten(-2)
+    q_rotated = self._rotate(q, cos, sin)
+    k_rotated = self._rotate(k, cos, sin)
 
-    return q_rotated.type_as(q), k_rotated.type_as(k)
+    return q_rotated, k_rotated
+  
+  @staticmethod
+  def _rotate(x: torch.Tensor, cos, sin):
+    x1, x2 = x.view(*x.shape[:-1], -1, 2).unbind(dim=-1)
+
+    real = x1 * cos - x2 * sin
+    im = x1 * sin + x2 * cos
+
+    return torch.stack((real, im), dim=-1).flatten(-2)
 
 
 class CausalSelfAttention(nn.Module):
@@ -65,8 +73,8 @@ class CausalSelfAttention(nn.Module):
     self.kv_proj = nn.Linear(config.n_embed, 2 * (config.n_kv_heads * self.head_dim), bias=False)
     self.rope = RotaryPositionalEmbedding(config=config)
     self.proj = nn.Linear(config.n_embed, config.n_embed, bias=False)
-    self.q_proj.__INIT_SCALAR__ = pow((2 * config.n_layers), -0.5)
-    self.kv_proj.__INIT_SCALAR__ = pow((2 * config.n_layers), -0.5)
+    # self.q_proj.__INIT_SCALAR__ = pow((2 * config.n_layers), -0.5)
+    # self.kv_proj.__INIT_SCALAR__ = pow((2 * config.n_layers), -0.5)
     self.proj.__INIT_SCALAR__ = pow((2 * config.n_layers), -0.5)
 
   def forward(self, x: torch.Tensor, block_mask = None):
@@ -151,6 +159,7 @@ class LanguageModel(nn.Module):
     self.token_embed.weight = self.head.weight
 
   @staticmethod
+  @torch.compiler.disable
   def _build_flex_block_mask(doc_ids: torch.Tensor):
     B, T = doc_ids.shape
 
