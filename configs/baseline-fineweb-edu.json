@@ -33,9 +33,9 @@
     "path": "data/vocabs/vocab_fineweb-edu_32768.json"
   },
   "tokens": {
-    "batch_size": 16,
-    "grad_accum_steps": 4,
-    "train_tokens": 9779000000
+    "batch_size": 64,
+    "grad_accum_steps": 1,
+    "train_tokens": 9948265810
   },
   "eval": {
     "interval": 500,
