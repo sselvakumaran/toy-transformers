@@ -53,6 +53,9 @@ else
   cd "$REPO_DIR"
 fi
 
+RUN_USER="${RUN_USER:-$(whoami)}"
+chown -R "$RUN_USER":"$RUN_USER" .
+
 # ── python env + deps (conditional) ──
 if python3 -c "import torch" 2>/dev/null; then
   echo "[SETUP] torch already available, skipping venv creation"

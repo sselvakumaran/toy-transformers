@@ -53,6 +53,7 @@ class RotaryPositionalEmbedding(nn.Module):
   @staticmethod
   def _rotate(x: torch.Tensor, cos, sin):
     x1, x2 = x.view(*x.shape[:-1], -1, 2).unbind(dim=-1)
+    cos, sin = cos.to(x.dtype), sin.to(x.dtype)
 
     real = x1 * cos - x2 * sin
     im = x1 * sin + x2 * cos
