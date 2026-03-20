@@ -2,7 +2,7 @@
   "run": {
     "name": "baseline-fineweb-edu",
     "log_interval": 10,
-    "save_interval": 5000,
+    "save_interval": 2500,
     "seed": 42
   },
   "dataset": {
@@ -38,7 +38,7 @@
     "train_tokens": 10000000000
   },
   "eval": {
-    "interval": 500,
+    "interval": 250,
     "batches": 20
   }
 }
