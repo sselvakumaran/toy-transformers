@@ -22,6 +22,8 @@ def eval(
 	device: str = "cuda",
 	limit: int = 0,
 	batch_size: int = 1,
+	bos_id: int = 0,
+	pad_id: int = 1,
 ) -> dict:
 	table = pq.read_table(eval_ds)
 	n = len(table) if limit <= 0 else min(limit, len(table))
@@ -32,7 +34,7 @@ def eval(
 		answers = table["answers"][i].as_py()
 		label = table["label"][i].as_py()
 
-		q_tokens = vocab.encode(question.encode("utf-8"))
+		q_tokens = [bos_id] + vocab.encode(question.encode("utf-8"))
 
 		candidate_tokens = []
 		answer_lens = []
@@ -69,7 +71,7 @@ def eval(
 		max_len = max(len(s) for s in all_seqs)
 		total_seqs = len(all_seqs)
 
-		tokens = torch.zeros(total_seqs, max_len, dtype=torch.long)
+		tokens = torch.full((total_seqs, max_len), pad_id, dtype=torch.long)
 		mask = torch.zeros(total_seqs, max_len, dtype=torch.long)
 		for j, toks in enumerate(all_seqs):
 			L = len(toks)
@@ -152,7 +154,8 @@ def main():
 	eval_parquet = REPO_ROOT / eval_rel
 
 	block_size = cfg.model.config["block_size"]
-	results = eval(model, vocab, eval_parquet, block_size, args.device, args.limit, args.batch_size)
+	results = eval(model, vocab, eval_parquet, block_size, args.device, args.limit, args.batch_size,
+		bos_id=cfg.tokenizer.bos_id, pad_id=cfg.tokenizer.pad_id)
 
 	print(f"\nacc:      {results['acc']:.4f}")
 	print(f"acc_norm: {results['acc_norm']:.4f}")

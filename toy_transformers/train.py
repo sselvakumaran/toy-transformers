@@ -249,6 +249,9 @@ def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 		bos_id=cfg.tokenizer.bos_id, pad_id=cfg.tokenizer.pad_id,
 		shuffle_docs=True, seed=cfg.run.seed,
 	)
+	train_dataset.shards_consumed = status.shards_consumed
+	for i, folder in enumerate(cfg.dataset.dataset_folders):
+		train_dataset.source_shards_consumed[i] = status.dataset_shards.get(folder, 0)
 	val_dataset = ShardDataset(
 		shard_paths=[val_path],
 		block_size=block_size,

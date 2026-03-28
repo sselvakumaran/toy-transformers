@@ -2,6 +2,7 @@
 /.cache
 /data
 /artifacts
+/runs
 /.vscode
 **/.DS_Store
 experiments/**/checkpoints/
