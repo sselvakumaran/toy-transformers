@@ -2,7 +2,7 @@
   "run": {
     "name": "baseline-fineweb-edu",
     "log_interval": 10,
-    "save_interval": 5000,
+    "save_interval": 2500,
     "seed": 42
   },
   "dataset": {
@@ -33,12 +33,12 @@
     "path": "data/vocabs/vocab_fineweb-edu_32768.json"
   },
   "tokens": {
-    "batch_size": 16,
+    "batch_size": 64,
     "grad_accum_steps": 4,
-    "train_tokens": 9779000000
+    "train_tokens": 10000000000
   },
   "eval": {
-    "interval": 500,
+    "interval": 250,
     "batches": 20
   }
 }

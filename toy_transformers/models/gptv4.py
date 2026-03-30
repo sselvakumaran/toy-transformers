@@ -53,6 +53,7 @@ class RotaryPositionalEmbedding(nn.Module):
   @staticmethod
   def _rotate(x: torch.Tensor, cos, sin):
     x1, x2 = x.view(*x.shape[:-1], -1, 2).unbind(dim=-1)
+    cos, sin = cos.to(x.dtype), sin.to(x.dtype)
 
     real = x1 * cos - x2 * sin
     im = x1 * sin + x2 * cos
@@ -184,7 +185,8 @@ class LanguageModel(nn.Module):
   def forward(self,
     idx: torch.Tensor, targets=None,
     doc_ids: Optional[torch.Tensor] = None,
-    loss_mask: Optional[torch.Tensor] = None
+    loss_mask: Optional[torch.Tensor] = None,
+    eval_logits: bool = False
   ):
     _, T = idx.size() # number of batches, token sequence
     block_size = self.config.block_size
@@ -208,7 +210,7 @@ class LanguageModel(nn.Module):
         x = block(x, block_mask)
     x = self.ln(x)
     
-    if targets is None: x = x[:, [-1], :]
+    if targets is None and not eval_logits: x = x[:, [-1], :]
     logits = self.head(x)
     logits = self.config.logit_cap * torch.tanh(logits / self.config.logit_cap)
 

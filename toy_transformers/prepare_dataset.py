@@ -1,9 +1,6 @@
 import argparse
 import json
-import os
 import requests
-import sys
-import time
 from pathlib import Path
 from typing import Optional
 

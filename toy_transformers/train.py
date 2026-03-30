@@ -47,17 +47,32 @@ def setup_model(cfg: TrainingConfig, total_steps: int, device: str):
 	scheduler = cfg.optimizer.build_scheduler(optimizer, total_steps)
 	return model, optimizer, scheduler
 
-def maybe_resume(run_dir: Path, cfg, model, optimizer, scheduler, device: str) -> RunStatus:
+def maybe_resume(run_dir: Path, cfg, model, optimizer, scheduler, sync: S3Sync, device: str) -> RunStatus:
 	temp_ckpt = run_dir / "checkpoints/temp"
+	s3_run = f"runs/{cfg.run.name}"
+
+	status_local = (run_dir / "status.json").exists()
+	status_s3 = sync.exists(f"{s3_run}/status.json")
+	print("[RESUME]", f"status.json local={status_local}, s3={status_s3}")
+	if not status_local and status_s3:
+		ok = sync.pull(f"{s3_run}/status.json")
+		print("[RESUME]", f"pulled status.json: {ok}, exists now: {(run_dir / 'status.json').exists()}")
 	status = RunStatus.load(run_dir)
+	print("[RESUME]", f"loaded status: step={status.step}, shards_consumed={status.shards_consumed}")
+
+	ckpt_local = temp_ckpt.exists()
+	ckpt_s3 = sync.exists(f"{s3_run}/checkpoints/temp")
+	print("[RESUME]", f"temp ckpt local={ckpt_local}, s3={ckpt_s3}")
+	if not ckpt_local and status.step > 0 and ckpt_s3:
+		print("[RESUME]", "pulling temp checkpoint from S3...")
+		sync.pull(f"{s3_run}/checkpoints/temp")
 
 	if temp_ckpt.exists() and status.step > 0:
-		print("[SETUP]", f"resuming, step={status.step}, shards_consumed={status.shards_consumed}")
+		print("[RESUME]", f"resuming, step={status.step}, shards_consumed={status.shards_consumed}")
 		load_model(temp_ckpt, cfg, model=model, optimizer=optimizer, scheduler=scheduler, device=device)
 	else:
-		print("[SETUP]", "starting fresh")
+		print("[RESUME]", "starting fresh")
 		status = RunStatus()
-	
 	return status
 
 
@@ -209,7 +224,7 @@ def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 	total_steps = compute_total_steps(cfg)
 	
 	model, optimizer, scheduler = setup_model(cfg, total_steps, device)
-	status = maybe_resume(run_dir, cfg, model, optimizer, scheduler, device)
+	status = maybe_resume(run_dir, cfg, model, optimizer, scheduler, sync, device)
 
 	downloaders = []
 	sources = []
@@ -234,6 +249,9 @@ def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 		bos_id=cfg.tokenizer.bos_id, pad_id=cfg.tokenizer.pad_id,
 		shuffle_docs=True, seed=cfg.run.seed,
 	)
+	train_dataset.shards_consumed = status.shards_consumed
+	for i, folder in enumerate(cfg.dataset.dataset_folders):
+		train_dataset.source_shards_consumed[i] = status.dataset_shards.get(folder, 0)
 	val_dataset = ShardDataset(
 		shard_paths=[val_path],
 		block_size=block_size,

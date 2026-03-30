@@ -168,9 +168,8 @@ def _iter_docs(
     random.Random(seed + shard_idx).shuffle(boundaries)
   for start, end in boundaries:
     doc = tokens[start:end]
-    if len(doc) > max_doc_len:
-      doc = doc[:max_doc_len]
-    yield doc
+    for chunk_start in range(0, len(doc), max_doc_len):
+      yield doc[chunk_start:chunk_start + max_doc_len]
 
 def _make_sample(pack: list[np.ndarray], 
   block_size: int, 
@@ -287,8 +286,5 @@ class AggregateDataset(IterableDataset):
             self.block_size, self.bos_id, self.pad_id
           )
         pack, pack_len = [], 0
-      if doc_len > self.block_size:
-        doc = doc[:self.block_size]
-        doc_len = self.block_size
       pack.append(doc)
       pack_len += doc_len
