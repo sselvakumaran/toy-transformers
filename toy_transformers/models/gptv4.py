@@ -1,9 +1,9 @@
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+from torch.nn.attention.flex_attention import flex_attention, create_block_mask, BlockMask
 
 # Version 4 - document masking, GQA
 
@@ -160,8 +160,7 @@ class LanguageModel(nn.Module):
     self.token_embed.weight = self.head.weight
 
   @staticmethod
-  @torch.compiler.disable
-  def _build_flex_block_mask(doc_ids: torch.Tensor):
+  def build_flex_block_mask(doc_ids: torch.Tensor):
     B, T = doc_ids.shape
 
     def causal_mask(b, h, q_idx, kv_idx):
@@ -175,7 +174,7 @@ class LanguageModel(nn.Module):
     )
 
   @staticmethod
-  def _build_bool_mask(doc_ids: torch.Tensor) -> torch.Tensor:
+  def build_bool_mask(doc_ids: torch.Tensor) -> torch.Tensor:
     """Causal + doc-boundary boolean mask — fallback for non-CUDA devices."""
     _, T = doc_ids.shape
     causal = torch.ones(T, T, dtype=torch.bool, device=doc_ids.device).tril()
@@ -183,20 +182,12 @@ class LanguageModel(nn.Module):
     return (causal.unsqueeze(0) & doc).unsqueeze(1)    # (B, 1, T, T)
 
   def forward(self,
-    idx: torch.Tensor, targets=None,
-    doc_ids: Optional[torch.Tensor] = None,
+    idx: torch.Tensor, targets=None, block_mask: Optional[Union[torch.Tensor, BlockMask]] = None,
     loss_mask: Optional[torch.Tensor] = None,
     eval_logits: bool = False
   ):
     _, T = idx.size() # number of batches, token sequence
     block_size = self.config.block_size
-
-    block_mask = None
-    if doc_ids is not None:
-      if doc_ids.device.type == "cuda":
-        block_mask = self._build_flex_block_mask(doc_ids)
-      else:
-        block_mask = self._build_bool_mask(doc_ids)
 
     idx: torch.Tensor = idx if T <= block_size else idx[:, -block_size:]
 

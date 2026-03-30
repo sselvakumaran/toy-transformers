@@ -73,6 +73,12 @@ def maybe_resume(run_dir: Path, cfg, model, optimizer, scheduler, sync: S3Sync, 
 	else:
 		print("[RESUME]", "starting fresh")
 		status = RunStatus()
+
+	metrics_rel = f"{s3_run}/metrics.jsonl"
+	metrics_local = run_dir / "metrics.jsonl"
+	if not metrics_local.exists() and sync.exists(metrics_rel):
+		print("[RESUME]", "pulling metrics.jsonl from S3...")
+		sync.pull(metrics_rel)
 	return status
 
 
@@ -130,7 +136,11 @@ def train(
 			loss_accum = 0.0
 			for mx, my, mdoc, mmask in micro_buffer:
 				with torch.autocast(device_type=device, dtype=torch.bfloat16):
-					_, loss = model(mx, my, doc_ids=mdoc, loss_mask=mmask)
+					if doc_ids.device.type == "cuda":
+						block_mask = model.build_flex_block_mask(doc_ids = mdoc)
+					else:
+						block_mask = model.build_bool_mask(doc_ids)
+					_, loss = model(mx, targets=my, block_mask=block_mask, loss_mask=mmask)
 				loss = loss / cfg.tokens.grad_accum_steps
 				loss.backward()
 				loss_accum += loss.item()
