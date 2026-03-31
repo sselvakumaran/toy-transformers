@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field, asdict
 import json
 from pathlib import Path
+from typing import Optional
 import torch
 from toy_transformers.tokenization import Vocabulary
 
@@ -13,6 +14,7 @@ class TrainingConfig:
 		log_interval: int = 10
 		save_interval: int = 5000
 		seed: int = 42
+		description: str = ""
 
 	@dataclass
 	class DatasetConfig:
@@ -44,6 +46,7 @@ class TrainingConfig:
 		warmup_steps: int
 		weight_decay: float = 0.1
 		schedule: str = "cosine"
+		decay_frac: float = 1.0
 		adam_b1: float = 0.9
 		adam_b2: float = 0.95
 		adam_eps: float = 1e-8
@@ -56,26 +59,43 @@ class TrainingConfig:
 			)
 
 		def build_scheduler(self, optimizer, total_steps: int):
-			warmup = torch.optim.lr_scheduler.LinearLR(
-				optimizer, start_factor= 1/self.warmup_steps, total_iters=self.warmup_steps
-			)
+			decay_steps = int(self.decay_frac * total_steps)
+			stable_steps = total_steps - self.warmup_steps - decay_steps
 
-			if self.schedule == "cosine":
-				decay = torch.optim.lr_scheduler.CosineAnnealingLR(
-					optimizer, T_max=total_steps - self.warmup_steps, eta_min=self.min_lr
-				)
-			elif self.schedule == "linear":
-				decay = torch.optim.lr_scheduler.LinearLR(
-					optimizer, 
-					start_factor=1.0, end_factor=self.min_lr / self.max_lr,
-					total_iters=total_steps - self.warmup_steps
-				)
-			else: raise ValueError(f"unknown schedule {self.schedule}")
+			schedules, milestones = [], []
+			
+			if self.warmup_steps > 0:
+				schedules.append(torch.optim.lr_scheduler.LinearLR(
+					optimizer, start_factor= 1/self.warmup_steps, total_iters=self.warmup_steps
+				))
+				milestones.append(self.warmup_steps)
+			
+			if stable_steps > 0:
+				schedules.append(torch.optim.lr_scheduler.ConstantLR(
+					optimizer, factor=1.0, total_iters=stable_steps
+				))
+				milestones.append(self.warmup_steps + stable_steps)
 
+			if decay_steps > 0:
+				if self.schedule == "cosine":
+					decay = torch.optim.lr_scheduler.CosineAnnealingLR(
+						optimizer, T_max=decay_steps, eta_min=self.min_lr
+					)
+				elif self.schedule == "linear":
+					decay = torch.optim.lr_scheduler.LinearLR(
+						optimizer, 
+						start_factor=1.0, end_factor=self.min_lr / self.max_lr,
+						total_iters=decay_steps
+					)
+				else: raise ValueError(f"unknown schedule {self.schedule}")
+				schedules.append(decay)
+				milestones.append(total_steps)
+
+			if len(schedules) == 1: return schedules[0]
+			milestones = milestones[:-1]
 			return torch.optim.lr_scheduler.SequentialLR(
-				optimizer, schedulers=[warmup, decay], milestones=[self.warmup_steps]
+				optimizer, schedulers=schedules, milestones=milestones
 			)
-
 
 	@dataclass
 	class TokenizerConfig:
@@ -97,7 +117,11 @@ class TrainingConfig:
 	class TokensConfig:
 		batch_size: int
 		grad_accum_steps: int
-		train_tokens: int
+		train_tokens: int = -1
+		train_steps: int = -1
+
+		def __post_init__(self):
+			if (self.train_tokens <= 0) == (self.train_steps <= 0): raise ValueError("can only have one limit")
 
 	@dataclass
 	class EvalConfig:

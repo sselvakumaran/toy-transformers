@@ -34,9 +34,11 @@ def setup_data(cfg: TrainingConfig, sync: S3Sync) -> tuple[dict, Path]:
 	return metadatas, val_path
 
 def compute_total_steps(cfg: TrainingConfig) -> int:
-	if cfg.tokens.train_tokens <= 0:
-		raise ValueError("train_tokens invalid")
-	return cfg.tokens.train_tokens // cfg.tokens_per_step
+	if cfg.tokens.train_steps > 0:
+		return cfg.tokens.train_steps
+	if cfg.tokens.train_tokens > 0:
+		return cfg.tokens.train_tokens // cfg.tokens_per_step
+	raise ValueError("train_tokens invalid")
 
 def setup_model(cfg: TrainingConfig, total_steps: int, device: str):
 	torch.set_float32_matmul_precision("medium")
