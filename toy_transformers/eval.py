@@ -50,7 +50,9 @@ def eval(
 
 		examples.append((candidate_tokens, answer_lens, label))
 
-	print("[EVALUATE]", f"{len(examples)} examples, batch_size={batch_size}")
+	print("[EVALUATE]", f"{len(examples)}/{len(table)} examples, batch_size={batch_size}")
+	# improve cache by sorting by sequence length
+	examples.sort(key=lambda ex: max(len(toks) for toks in ex[0]))
 
 	num_correct, num_correct_norm, num_total = 0, 0, 0
 	for batch_start in tqdm(range(0, len(examples), batch_size), desc="evaluating"):
@@ -122,6 +124,7 @@ def main():
 	parser = argparse.ArgumentParser(description="evaluate a trained model on an eval dataset")
 	parser.add_argument("config", help="training config JSON (model arch + tokenizer)")
 	parser.add_argument("eval_name", help="eval name (matches directory under data/evals/)")
+	parser.add_argument("checkpoint", help="name of checkpoint (ex. final)")
 	parser.add_argument("--bucket", type=str, required=True,
 		help="S3 bucket name, e.g. my-bucket")
 	parser.add_argument("--device", type=str, default="cuda")
@@ -139,12 +142,13 @@ def main():
 
 	# build model
 	model = cfg.model.build_model(vocab_size=cfg.tokenizer.vocab_size, device=args.device)
+	model.compile()
 	model.eval()
 
 	# pull + load checkpoint
-	ckpt_rel = f"runs/{cfg.run.name}/checkpoints/model/model.pt"
+	ckpt_dir = REPO_ROOT / f"runs/{cfg.run.name}/checkpoints/{args.checkpoint}"
+	ckpt_rel = f"runs/{cfg.run.name}/checkpoints/{args.checkpoint}/model.pt"
 	sync.pull_atomic(ckpt_rel)
-	ckpt_dir = REPO_ROOT / f"runs/{cfg.run.name}/checkpoints/model"
 	load_model(ckpt_dir, cfg, model, device=args.device)
 	print("[EVAL]", f"loaded checkpoint from {ckpt_dir}")
 
