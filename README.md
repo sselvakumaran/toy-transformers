@@ -33,3 +33,10 @@
 - [X] add support for cloud compute
   - [X] able to download data (Colab / ssh-like)
   - [X] able to persist work (Colab / ssh-like)
+
+
+TO RUN:
+```bash
+chmod +x container_train.bash
+./container_train.bash <ip> <branch> <config_path>
+```
