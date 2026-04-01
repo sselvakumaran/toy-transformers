@@ -37,7 +37,7 @@
     "grad_accum_steps": 4,
     "train_tokens": 10000000000
   },
-  "eval": {
+  "val_loss": {
     "interval": 250,
     "batches": 20
   }

@@ -15,6 +15,8 @@ class GPTv4Config:
   n_heads: int = 8 # number of embedding heads (n_embed / n_heads MUST be an integer)
   n_embed: int = 288 # number of dimensions in embedding vector
   n_layers: int = 6 # number of blocks
+  mlp_mul: int = 4
+  activation_fn: str = "relu2"
   n_kv_heads: int = 2
   rope_base: float = 10000.0
   logit_cap: float = 30.0
@@ -102,15 +104,25 @@ class CausalSelfAttention(nn.Module):
 class MultiLayerPerceptron(nn.Module):
   def __init__(self, config: GPTv4Config):
     super().__init__()
-    self.l1 = nn.Linear(config.n_embed, 4*config.n_embed, bias=False)
-    self.proj = nn.Linear(4*config.n_embed, config.n_embed, bias=False)
+    self.activation_fn = config.activation_fn
+    n_hidden = config.mlp_mul * config.n_embed
+
+    self.l1 = nn.Linear(config.n_embed, n_hidden, bias=False)
+    if self.activation_fn == "swiglu":
+      self.l1_gate = nn.Linear(config.n_embed, n_hidden, bias=False)
+
+    self.proj = nn.Linear(n_hidden, config.n_embed, bias=False)
     self.proj.__INIT_SCALAR__ = (2 * config.n_layers) ** -0.5
 
   def forward(self, x: torch.Tensor):
-    x = self.l1(x)
-    x = F.relu(x).square()
-    x = self.proj(x)
-    return x
+    if self.activation_fn == "relu2":
+      x = F.relu(self.l1(x)).square()
+    elif self.activation_fn == "swiglu":
+      x = self.l1(x) * F.silu(self.l1_gate(x))
+    elif self.activation_fn == "gelu":
+      x = F.gelu(self.l1(x))
+    else: raise ValueError(f"unknown activation function {self.activation_fn}")
+    return self.proj(x)
 
 
 class TransformerBlock(nn.Module):

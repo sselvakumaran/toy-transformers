@@ -124,7 +124,7 @@ class TrainingConfig:
 			if (self.train_tokens <= 0) == (self.train_steps <= 0): raise ValueError("can only have one limit")
 
 	@dataclass
-	class EvalConfig:
+	class ValLossConfig:
 		interval: int = 500
 		batches: int = 20
 
@@ -134,7 +134,7 @@ class TrainingConfig:
 	optimizer: OptimizerConfig
 	tokenizer: TokenizerConfig
 	tokens: TokensConfig
-	eval: EvalConfig
+	eval: ValLossConfig
 
 	@property
 	def tokens_per_step(self):
@@ -151,7 +151,7 @@ class TrainingConfig:
 			optimizer=cls.OptimizerConfig(**raw.get("optimizer", {})),
 			tokenizer=cls.TokenizerConfig(**raw.get("tokenizer", {})),
 			tokens=cls.TokensConfig(**raw.get("tokens", {})),
-			eval=cls.EvalConfig(**raw.get("eval", {})),
+			eval=cls.ValLossConfig(**raw.get("val_loss", {})),
 		)
 
 	def to_json(self, path: str | Path):
