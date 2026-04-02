@@ -2,8 +2,8 @@
 set -euo pipefail
 
 if [[ $# -ne 3 ]]; then
-	echo "usage: ./ssh_train <ip> <branch> <config>"
-	echo "  e.g. ./ssh_train 123.45.67.89 gptv4 configs/gptv4.json"
+	echo "usage: ./container_train <ip> <branch> <config>"
+	echo "  e.g. ./container_train 123.45.67.89 main configs/gptv4.json"
 	exit 1
 fi
 

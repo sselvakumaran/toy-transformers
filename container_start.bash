@@ -13,10 +13,8 @@ if [ ! -z "$SSH_PORT" ]; then
 fi
 
 if [ ! -d /workspace/toy-transformers ]; then
-	git clone https://github.com/sselvakumaran/toy-transformers.git \
-		/workspace/toy-transformers
+	git clone https://github.com/sselvakumaran/toy-transformers.git /workspace/toy-transformers
 fi
-
 
 echo "Starting SSH server on port ${SSH_PORT:-22}"
 
