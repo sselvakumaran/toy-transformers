@@ -232,7 +232,7 @@ def run_verify(shuffled_dir: Path, vocab_path: Path, bos_token: str):
 
 	print("[VERIFY]", "done")
 
-def run_upload(dataset_dir: Path, name: str, vocab_path: Path, s3_remote: str):
+def run_upload(dataset_dir: Path, name: str, vocab_path: Path, s3_remote: str, skip_existing: bool = False):
 	sync = S3Sync(remote_base=s3_remote, local_root=REPO_ROOT)
 
 	print("[UPLOAD]", f"uploading shuffled shards to {s3_remote}/data/datasets/{name}/")
@@ -240,12 +240,13 @@ def run_upload(dataset_dir: Path, name: str, vocab_path: Path, s3_remote: str):
 	upload_exts = {".bin", ".json"}
 	for path in tqdm(sorted(p for p in dataset_dir.iterdir() if p.suffix in upload_exts), desc="uploading"):
 		rel = path.relative_to(REPO_ROOT)
-		sync.push(rel)
+		sync.push(rel, skip_existing=skip_existing)
 
 	# upload vocab
+	vocab_path = Path(vocab_path).resolve()
 	vocab_rel = vocab_path.relative_to(REPO_ROOT)
 	print("[UPLOAD]", f"pushing vocab: {vocab_rel}")
-	sync.push(vocab_rel)
+	sync.push(vocab_rel, skip_existing=skip_existing)
 
 	print("[UPLOAD]", "done")
 
@@ -293,6 +294,8 @@ def main():
 	# upload
 	parser.add_argument("--s3_remote", type=str, default=None,
 		help="S3 remote base, e.g. s3://my-bucket/toy-transformers")
+	parser.add_argument("--skip_existing", action="store_true",
+		help="skip uploading files that already exist in S3")
 
 	args = parser.parse_args()
 
@@ -356,7 +359,8 @@ def main():
 			dataset_dir=dataset_dir,
 			name=args.name,
 			vocab_path=vocab_path,
-			s3_remote=args.s3_remote
+			s3_remote=args.s3_remote,
+			skip_existing=args.skip_existing
 		)
 	
 	print("[STATUS]", f"dataset ready at {shuffled_dir}")
