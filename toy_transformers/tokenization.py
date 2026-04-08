@@ -129,7 +129,27 @@ class Vocabulary():
 
   def decode(self, idxs: List[int]) -> List[Token]:
     return [self.tokens[idx] for idx in idxs]
-  
+
+  def add_special_tokens(self, new_tokens: List[str]) -> Dict[str, int]:
+    is_bytes = self.config.mode == TokenizationMode.BYTES
+    added = {}
+    for tok_str in new_tokens:
+      typed = tok_str.encode(ENCODING) if is_bytes else tok_str
+      if typed in self.token_to_idx:
+        continue
+      idx = len(self.tokens)
+      self.tokens.append(typed)
+      self.config.special_tokens_str.append(tok_str)
+      self.config.special_tokens.append(typed)
+      added[tok_str] = idx
+    if added:
+      self.config.vocab_size = len(self.tokens)
+      # rebuild regex to match new specials and refresh cached_property values
+      self.config.__post_init__()  
+      self.__dict__.pop('token_to_idx', None)
+      self.__dict__.pop('_pair_to_rank', None)
+    return added
+
   def save(self, path: str | Path):
     path = Path(path)
     if path.suffix != '.json':
@@ -342,30 +362,32 @@ def create_bpe(
 
   counts = _parallel_preprocess(data_iter, config)
 
-  base_tokens = []
-  special_token_set = set(config.special_tokens)
+  for st in config.special_tokens:
+    counts.pop(st, None)
 
   if mode == TokenizationMode.BYTES:
-    base_tokens = [bytes([i]) for i in range(256)
-      if bytes([i]) not in special_token_set]
+    base_tokens = [bytes([i]) for i in range(256)]
   else:
     chars = set()
     for word in counts:
       chars.update(word)
-    base_tokens = sorted(chars - special_token_set)
-  vocab = list(config.special_tokens) + base_tokens
+    base_tokens = sorted(chars)
+
+  # specials go at the end, after all base + merge tokens
+  vocab = list(base_tokens)
   token_to_idx = {c: i for i, c in enumerate(vocab)}
 
-  corpus = _TokenMergeTracker(counts, token_to_idx, config.special_tokens)
+  corpus = _TokenMergeTracker(counts, token_to_idx, [])
   heap = [(-count, pair) for pair, count in corpus.pair_counts.items()]
   heapq.heapify(heap)
   merges = dict()
   num_live_pairs = len(corpus.pair_counts)
 
+  merge_target = vocab_size - len(config.special_tokens)
   print("starting merging...")
-  pbar = tqdm(total=vocab_size - len(vocab), desc="BPE Training")
+  pbar = tqdm(total=merge_target - len(vocab), desc="BPE Training")
 
-  while len(vocab) < vocab_size and heap:
+  while len(vocab) < merge_target and heap:
     if heap_cleanup_ratio > 0 and len(heap) > heap_cleanup_ratio * max(num_live_pairs, 1):
       heap = [(-c, p) for p, c in corpus.pair_counts.items() if c > 0]
       heapq.heapify(heap)
@@ -393,6 +415,11 @@ def create_bpe(
     pbar.update(1)
   
   pbar.close()
+
+  # append special tokens at the end
+  for st in config.special_tokens:
+    token_to_idx[st] = len(vocab)
+    vocab.append(st)
 
   return Vocabulary(config, vocab, merges)
 

@@ -76,6 +76,8 @@ def run_download(
 	print("[DOWNLOAD]", f"{dataset_id} - {subset} - {split}")
 	shard_urls = get_shard_urls(dataset_id, subset, split)
 
+	if shard_indices:
+		shard_indices = [i for i in shard_indices if i < len(shard_urls)]
 	selected = [(i, shard_urls[i]) for i in shard_indices] if shard_indices else list(enumerate(shard_urls))
 
 	status["shard_urls"] = [url for _, url in selected]
@@ -144,10 +146,11 @@ def run_tokenize(
 		print("[TOKENIZE]", "skipping tokenization")
 		return
 
+	raw_files = sorted(raw_dir.glob("*.parquet"))
+
 	if not vocab_path.exists():
 		print("[TOKENIZE]", f"training vocab (size={vocab_size})...")
 
-		raw_files = sorted(raw_dir.glob("*.parquet"))
 		vocab_files = raw_files[:vocab_train_shards]
 
 		vocab = create_bpe(
@@ -212,7 +215,8 @@ def run_verify(shuffled_dir: Path, vocab_path: Path, bos_token: str):
 	print("[VERIFY]", "running checks...")
 
 	vocab = Vocabulary.load(vocab_path)
-	bos_id = vocab.token_to_idx[bytes(bos_token)]
+	bos_key = bos_token.encode('utf-8') if vocab.config.mode == TokenizationMode.BYTES else bos_token
+	bos_id = vocab.token_to_idx[bos_key]
 	with open(shuffled_dir / "metadata.json") as f:
 		meta = json.load(f)
 
@@ -229,17 +233,17 @@ def run_verify(shuffled_dir: Path, vocab_path: Path, bos_token: str):
 	print("[VERIFY]", "done")
 
 def run_upload(dataset_dir: Path, name: str, vocab_path: Path, s3_remote: str):
-	sync = S3Sync(remote_base=s3_remote, local_root=dataset_dir.parent.parent)
+	sync = S3Sync(remote_base=s3_remote, local_root=REPO_ROOT)
 
 	print("[UPLOAD]", f"uploading shuffled shards to {s3_remote}/data/datasets/{name}/")
 
-	shuffled_dir = dataset_dir / "shuffled"
-	for path in tqdm(sorted(shuffled_dir.iterdir()), desc="uploading"):
-		rel = path.relative_to(dataset_dir.parent.parent)
+	upload_exts = {".bin", ".json"}
+	for path in tqdm(sorted(p for p in dataset_dir.iterdir() if p.suffix in upload_exts), desc="uploading"):
+		rel = path.relative_to(REPO_ROOT)
 		sync.push(rel)
 
 	# upload vocab
-	vocab_rel = vocab_path.relative_to(dataset_dir.parent.parent)
+	vocab_rel = vocab_path.relative_to(REPO_ROOT)
 	print("[UPLOAD]", f"pushing vocab: {vocab_rel}")
 	sync.push(vocab_rel)
 
@@ -254,6 +258,8 @@ def main():
 	parser.add_argument("--split", default="train", help="hf dataset split")
 	parser.add_argument("--shard_indices", nargs="+", type=int, default=None,
     help="subset of shard indices to download (default: all)")
+	parser.add_argument("--max_shards", type=int, default=None,
+    help="download at most N parquet shards from HF (first N)")
 	
 	parser.add_argument("--vocab_size", type=int, default=32768)
 	parser.add_argument("--special_tokens", nargs="+", default=["<BOS>", "<PAD>"],
@@ -305,10 +311,14 @@ def main():
 
 	status = {} if args.force else load_status(dataset_dir)
 
+	shard_indices = args.shard_indices
+	if shard_indices is None and args.max_shards is not None:
+		shard_indices = list(range(args.max_shards))
+
 	if not args.skip_download: run_download(
-		args.dataset_id, args.subset, args.split, 
-		raw_dir, dataset_dir, status, 
-		args.shard_indices
+		args.dataset_id, args.subset, args.split,
+		raw_dir, dataset_dir, status,
+		shard_indices
 	)
 	
 	if not args.skip_tokenize: run_tokenize(
