@@ -7,6 +7,7 @@ from typing import Optional
 import numpy as np
 import pyarrow.parquet as pq
 import pyarrow
+import pyarrow.compute as pc
 from tqdm import tqdm
 
 from toy_transformers.tokenization import Vocabulary, TokenizationMode, create_bpe, bulk_encode, shuffle_shards
@@ -108,7 +109,7 @@ def stream_raw_ds(
 		for rg in range(pf.metadata.num_row_groups):
 			table = pf.read_row_group(rg, columns=cols)
 			if filter_docs:
-				mask = pyarrow.compute.greater_equal(table[score_column], min_score)
+				mask = pc.greater_equal(table[score_column], min_score)
 				table = table.filter(mask)
 			batch_tables.append(table)
 			batch_bytes += table.nbytes
@@ -120,10 +121,11 @@ def stream_raw_ds(
 		yield pyarrow.concat_tables(batch_tables)
 
 def stream_texts(
-	files: list[Path], bos_token: str, 
+	files: list[Path], bos_token: str,
 	score_column: Optional[str] = None, min_score: Optional[float] = None
 ):
-	for batch in stream_raw_ds(files, columns=["text"], 
+	cols = ["text"] if score_column is None else ["text", score_column]
+	for batch in stream_raw_ds(files, columns=cols,
 		score_column=score_column, min_score=min_score
 	):
 		yield (bos_token + bos_token.join(batch["text"].to_pylist())).encode('utf-8')
