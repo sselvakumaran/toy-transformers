@@ -99,7 +99,7 @@ def stream_raw_ds(
 	score_column: Optional[str] = None, min_score: Optional[float] = None
 ):
 	parquet_files = sorted(files)
-	filter_docs = score_column and min_score
+	filter_docs = score_column is not None and min_score is not None
 	cols = list(columns)
 	if filter_docs: assert score_column in cols
 
@@ -245,7 +245,7 @@ def run_upload(dataset_dir: Path, name: str, vocab_path: Path, s3_remote: str, s
 		sync.push(rel, skip_existing=skip_existing)
 
 	# upload vocab
-	vocab_path = Path(vocab_path).resolve()
+	vocab_path = Path(vocab_path)
 	vocab_rel = vocab_path.relative_to(REPO_ROOT)
 	print("[UPLOAD]", f"pushing vocab: {vocab_rel}")
 	sync.push(vocab_rel, skip_existing=skip_existing)
