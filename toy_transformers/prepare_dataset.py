@@ -352,7 +352,7 @@ def main():
 	)
 	
 	if args.verify: run_verify(
-		shuffled_dir=shuffled_dir,
+		shuffled_dir=shuffled_dir if not args.skip_shuffle else encoded_dir,
 		vocab_path=vocab_path,
 		bos_token=args.bos_token
 	)
