@@ -41,7 +41,6 @@ IM_START = "<|im_start|>"
 IM_END = "<|im_end|>"
 BOS = "<BOS>"
 
-
 def messages_to_chatml(messages: list[dict]) -> str:
 	parts = []
 	for msg in messages:

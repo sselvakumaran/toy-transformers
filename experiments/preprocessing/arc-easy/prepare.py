@@ -28,7 +28,6 @@ SUBSET = "ARC-Easy"
 SPLIT = "test"
 EVAL_NAME = "arc-easy"
 
-
 def run_reformat(raw_dir: Path, out_path: Path):
 	print("[REFORMAT]", "arc-easy -> CF format")
 
