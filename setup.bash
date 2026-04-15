@@ -16,6 +16,8 @@ if [[ ! -f .env ]]; then echo "ERROR: .env not found"; exit 1; fi
 set -a; source .env; set +a
 : "${AWS_ACCESS_KEY_ID:?missing}" "${AWS_SECRET_ACCESS_KEY:?missing}" "${BUCKET:?missing}"
 
+PY_VER="${PY_VER:-3.10}"
+
 # ── system deps (skip what's already present) ──
 echo "[SETUP] checking system dependencies..."
 MISSING=()
@@ -23,27 +25,35 @@ command -v git    >/dev/null || MISSING+=(git)
 command -v tmux   >/dev/null || MISSING+=(tmux)
 command -v curl   >/dev/null || MISSING+=(curl)
 command -v unzip  >/dev/null || MISSING+=(unzip)
-command -v python3 >/dev/null || MISSING+=(python3)
-command -v pip3 >/dev/null 2>&1 || dpkg -s python3-pip >/dev/null 2>&1 || MISSING+=(python3-pip)
 
 if [[ ${#MISSING[@]} -gt 0 ]]; then
   echo "[SETUP] installing: ${MISSING[*]}"
   $SUDO apt-get update -qq
   DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -qq "${MISSING[@]}"
 else
-  echo "[SETUP] all system deps present"
+  echo "[SETUP] base deps present"
 fi
 
-# awscli — apt 'awscli' package dropped in Ubuntu 24.04+, use the official v2 installer
-if ! command -v aws >/dev/null 2>&1; then
-  echo "[SETUP] installing awscli v2..."
-  ARCH=$(uname -m); case "$ARCH" in x86_64) AWS_ARCH=x86_64 ;; aarch64|arm64) AWS_ARCH=aarch64 ;; *) echo "unsupported arch $ARCH"; exit 1 ;; esac
-  TMP_AWS=$(mktemp -d)
-  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${AWS_ARCH}.zip" -o "$TMP_AWS/awscliv2.zip"
-  unzip -q "$TMP_AWS/awscliv2.zip" -d "$TMP_AWS"
-  $SUDO "$TMP_AWS/aws/install" --update >/dev/null
-  rm -rf "$TMP_AWS"
+# ── python ${PY_VER} via deadsnakes (required for torch 2.8 wheel + project parity) ──
+if ! command -v "python${PY_VER}" >/dev/null 2>&1; then
+  echo "[SETUP] installing python${PY_VER}..."
+  DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -qq software-properties-common
+  $SUDO add-apt-repository -y ppa:deadsnakes/ppa
+  $SUDO apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -qq \
+    "python${PY_VER}" "python${PY_VER}-venv" "python${PY_VER}-dev" "python${PY_VER}-distutils" || \
+    DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -qq \
+      "python${PY_VER}" "python${PY_VER}-venv" "python${PY_VER}-dev"
 fi
+
+# ensure pip for this interpreter
+if ! "python${PY_VER}" -m pip --version >/dev/null 2>&1; then
+  echo "[SETUP] bootstrapping pip for python${PY_VER}..."
+  curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
+  "python${PY_VER}" /tmp/get-pip.py --user || $SUDO "python${PY_VER}" /tmp/get-pip.py
+  rm -f /tmp/get-pip.py
+fi
+echo "[SETUP] python: $(command -v python${PY_VER}) ($(python${PY_VER} --version))"
 
 # ── GPU / CUDA probe ──
 HAS_GPU=0
@@ -82,8 +92,8 @@ pick_torch_index() {
   echo "https://download.pytorch.org/whl/cu118"
 }
 
-# ── pip helpers: install to system python without venv ──
-PY=python3
+# ── pip helpers: install to pinned python${PY_VER} without venv ──
+PY="python${PY_VER}"
 PIP_FLAGS=(--no-input --disable-pip-version-check)
 pip_install() {
   # try normal; on PEP 668 "externally-managed" error, retry with --break-system-packages
@@ -131,7 +141,18 @@ if [[ $TORCH_OK -eq 0 ]]; then
 fi
 
 # ── extra deps ──
-pip_install --quiet numpy tqdm pyarrow
+pip_install --quiet numpy tqdm pyarrow awscli
+
+# make sure the pip-installed aws is on PATH (--user installs land in ~/.local/bin)
+if ! command -v aws >/dev/null 2>&1; then
+  USER_BIN="$($PY -c 'import site,os;print(os.path.join(site.getuserbase(),"bin"))' 2>/dev/null || echo "$HOME/.local/bin")"
+  if [[ -x "$USER_BIN/aws" ]]; then
+    export PATH="$USER_BIN:$PATH"
+    hash -r
+  fi
+fi
+command -v aws >/dev/null || { echo "ERROR: aws still not on PATH after pip install"; exit 1; }
+echo "[SETUP] aws: $(command -v aws) ($(aws --version 2>&1 | head -n1))"
 
 # ── AWS config ──
 aws_set() {
@@ -175,7 +196,7 @@ if torch.cuda.is_available():
 PYEOF
 
 # ── launch training in tmux ──
-TRAIN_CMD="cd $RUN_HOME/$REPO_DIR && $PY -m toy_transformers.train $CONFIG_FILE $BUCKET"
+TRAIN_CMD="cd $RUN_HOME/$REPO_DIR && git fetch --quiet && git checkout $BRANCH && git pull --ff-only && $PY -m toy_transformers.train $CONFIG_FILE $BUCKET"
 
 if [[ "$RUN_USER" != "$(id -un)" ]]; then
   $SUDO -u "$RUN_USER" tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
