@@ -25,7 +25,7 @@ DATA_DIR = REPO_ROOT / "data"
 
 DATASET_ID = "allenai/ai2_arc"
 SUBSET = "ARC-Easy"
-SPLIT = "test"
+SPLIT = "train"
 EVAL_NAME = "arc-easy"
 
 def run_reformat(raw_dir: Path, out_path: Path):

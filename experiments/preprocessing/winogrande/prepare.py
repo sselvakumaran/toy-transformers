@@ -24,7 +24,7 @@ DATA_DIR = REPO_ROOT / "data"
 
 DATASET_ID = "allenai/winogrande"
 SUBSET = "winogrande_debiased"
-SPLIT = "validation"
+SPLIT = "train"
 EVAL_NAME = "winogrande"
 
 
