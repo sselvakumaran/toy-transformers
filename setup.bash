@@ -196,16 +196,26 @@ if torch.cuda.is_available():
 PYEOF
 
 # ── launch training in tmux ──
-TRAIN_CMD="cd $RUN_HOME/$REPO_DIR && git fetch --quiet && git checkout $BRANCH && git pull --ff-only && $PY -m toy_transformers.train $CONFIG_FILE $BUCKET"
+# tee into a logfile so output survives if the pane dies, and exec bash at the
+# end so the pane stays open after training exits (crash or clean) for attach.
+LOG_FILE="$RUN_HOME/$REPO_DIR/train.log"
+TRAIN_CMD="cd $RUN_HOME/$REPO_DIR && \
+  git fetch --quiet && git checkout $BRANCH && git pull --ff-only && \
+  $PY -m toy_transformers.train $CONFIG_FILE $BUCKET 2>&1 | tee -a $LOG_FILE; \
+  rc=\${PIPESTATUS[0]}; \
+  echo; echo \"[train exited rc=\$rc — pane left open, log: $LOG_FILE]\"; \
+  exec bash"
 
 if [[ "$RUN_USER" != "$(id -un)" ]]; then
   $SUDO -u "$RUN_USER" tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
   echo "[SETUP] launching training in tmux session '$SESSION_NAME' as $RUN_USER..."
-  $SUDO -u "$RUN_USER" tmux new-session -d -s "$SESSION_NAME" "$TRAIN_CMD"
+  $SUDO -u "$RUN_USER" tmux new-session -d -s "$SESSION_NAME" "bash -lc '$TRAIN_CMD'"
 else
   tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
   echo "[SETUP] launching training in tmux session '$SESSION_NAME'..."
-  tmux new-session -d -s "$SESSION_NAME" "$TRAIN_CMD"
+  tmux new-session -d -s "$SESSION_NAME" "bash -lc '$TRAIN_CMD'"
 fi
 
-echo "[SETUP] done. attach with: tmux attach -t $SESSION_NAME"
+echo "[SETUP] done."
+echo "  attach:   tmux attach -t $SESSION_NAME"
+echo "  log tail: tail -f $LOG_FILE"

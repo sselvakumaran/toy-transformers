@@ -47,6 +47,7 @@ def setup_model(cfg: TrainingConfig, total_steps: int, device: str):
 	model.compile()
 	optimizer = cfg.optimizer.build_optimizer(model)
 	scheduler = cfg.optimizer.build_scheduler(optimizer, total_steps)
+	print("[SETUP]", "model, optimizer, scheduler built")
 	return model, optimizer, scheduler
 
 def maybe_resume(run_dir: Path, cfg, model, optimizer, scheduler, sync: S3Sync, device: str) -> RunStatus:
@@ -281,6 +282,7 @@ def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 
 	train_loader = DataLoader(train_dataset, batch_size=cfg.tokens.batch_size, num_workers=0)
 	val_loader = DataLoader(val_dataset, batch_size=cfg.tokens.batch_size, num_workers=0, drop_last=True)
+	print("[SETUP]", f"initialized {len(downloaders)} downloader(s) + datasets")
 
 	train(
 		cfg, model, optimizer, scheduler,

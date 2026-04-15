@@ -30,5 +30,8 @@ $SCP "$ENV_FILE" "$SETUP_FILE" "${SSH_USER}@${IP}:~/"
 $SSH "chmod +x ~/setup.bash"
 
 echo "[local] launching: branch=$BRANCH config=$CONFIG (session=$SESSION)"
-$SSH -t "tmux kill-session -t $SESSION 2>/dev/null; \
-	tmux new-session -s $SESSION 'cd ~ && bash ./setup.bash $CONFIG $BRANCH; exec bash'"
+# setup.bash spawns its own detached tmux session — don't wrap it in one here
+# (that used to collide on the $SESSION name and kill itself mid-run).
+$SSH "cd ~ && bash ./setup.bash $CONFIG $BRANCH"
+echo "[local] setup finished. attaching to tmux session '$SESSION' (detach: Ctrl-b d)..."
+exec ssh -p "$SSH_PORT" -o StrictHostKeyChecking=accept-new -t "${SSH_USER}@${IP}" "tmux attach -t $SESSION"
