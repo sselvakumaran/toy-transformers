@@ -1,7 +1,7 @@
 {
   "run": {
     "name": "v4.0.1",
-    "log_interval": 25,
+    "log_interval": 10,
     "save_interval": 1000,
     "seed": 42,
     "description": "Updated to semantic reasoning, bumped up n_layers to 16 and change to WSD schedule for ablations."
@@ -32,7 +32,7 @@
     "adam_eps": 1e-8
   },
   "tokenizer": {
-    "path": "data/vocabs/vocab_fineweb-edu_32768.json"
+    "path": "data/vocabs/vocab_fineweb_32k.json"
   },
   "tokens": {
     "batch_size": 64,

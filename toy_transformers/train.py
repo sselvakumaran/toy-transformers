@@ -146,7 +146,7 @@ def train(
 				loss = loss / cfg.tokens.grad_accum_steps
 				loss.backward()
 				loss_accum += loss.item()
-			torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+			grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item()
 			optimizer.step()
 			scheduler.step()
 			step += 1
@@ -157,15 +157,23 @@ def train(
 				dt = time.time() - t0
 				tok_per_sec = (cfg.run.log_interval * cfg.tokens_per_step) / dt
 				lr = scheduler.get_last_lr()[0]
+				clip_ratio = min(1.0, 1.0 / (grad_norm + 1e-12))
+				param_norm = torch.sqrt(sum(p.detach().pow(2).sum() for p in model.parameters())).item()
 				metrics.write({
 					"step": step, "t_loss": round(loss_accum, 6),
-					"lr": lr, "tokens": step * cfg.tokens_per_step
+					"lr": lr, "tokens": step * cfg.tokens_per_step,
+					"grad_norm": round(grad_norm, 6),
+					"clip_ratio": round(clip_ratio, 6),
+					"param_norm": round(param_norm, 6),
 				})
 				metrics.flush()
 				print("[TRAIN]", " | ".join([
 					f"step {step:5d}/{total_steps}",
 					f"loss {loss_accum:.4f}",
 					f"lr {lr:.2e}",
+					f"gn {grad_norm:.3f}",
+					f"clip {clip_ratio:.2f}",
+					f"pn {param_norm:.1f}",
 					f"tok/s {tok_per_sec:.0f}",
 					f"shards {train_loader.dataset.shards_consumed}"
 				]))
@@ -282,10 +290,16 @@ def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser()
-	parser.add_argument("config", help="path to config JSON")
+	parser.add_argument("config", help="config name (resolved under configs/, .json optional) or explicit path")
 	parser.add_argument("bucket", help="S3 bucket/base name, can include subdirectories")
 	parser.add_argument("--device", default="cuda")
 	args = parser.parse_args()
-	
-	cfg = TrainingConfig.from_json(args.config)
+
+	config_path = Path(args.config)
+	if not config_path.exists():
+		candidate = REPO_ROOT / "configs" / args.config
+		if candidate.suffix != ".json":
+			candidate = candidate.with_suffix(".json")
+		config_path = candidate
+	cfg = TrainingConfig.from_json(str(config_path))
 	train_from_config(cfg=cfg, bucket=args.bucket, device=args.device)
