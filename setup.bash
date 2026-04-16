@@ -1,8 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-CONFIG_FILE="${1:?usage: ./setup.bash <config_file> [branch]}"
-BRANCH="${2:-main}"
+if [[ $# -lt 2 ]]; then
+  echo "usage: ./setup.bash <branch> <config_file> [config_file...]" >&2
+  exit 1
+fi
+BRANCH="$1"; shift
+CONFIGS=("$@")
 REPO_URL="https://github.com/sselvakumaran/toy-transformers.git"
 REPO_DIR="toy-transformers"
 RUN_USER="${RUN_USER:-$(id -un)}"
@@ -196,7 +200,11 @@ if torch.cuda.is_available():
 PYEOF
 
 # ── launch training in tmux ──
-TRAIN_CMD="cd $RUN_HOME/$REPO_DIR && $PY -m toy_transformers.train $CONFIG_FILE $BUCKET"
+# chain configs with `;` so one failure doesn't abort the rest.
+TRAIN_CMD="cd $RUN_HOME/$REPO_DIR || exit 1"
+for CFG in "${CONFIGS[@]}"; do
+  TRAIN_CMD+=" ; echo '[TRAIN] === $CFG ===' ; $PY -m toy_transformers.train $CFG $BUCKET"
+done
 
 if [[ "$RUN_USER" != "$(id -un)" ]]; then
   $SUDO -u "$RUN_USER" tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
