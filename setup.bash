@@ -201,7 +201,7 @@ PYEOF
 LOG_FILE="$RUN_HOME/$REPO_DIR/train.log"
 TRAIN_CMD="cd $RUN_HOME/$REPO_DIR && \
   git fetch --quiet && git checkout $BRANCH && git pull --ff-only && \
-  $PY -u -m toy_transformers.train $CONFIG_FILE $BUCKET 2>&1 | tee -a $LOG_FILE; \
+  $PY -u -m toy_transformers.train $CONFIG_FILE $BUCKET 2>&1 | { trap '' INT; tee -a $LOG_FILE; }; \
   rc=\${PIPESTATUS[0]}; \
   echo; echo \"[train exited rc=\$rc — pane left open, log: $LOG_FILE]\"; \
   exec bash"
