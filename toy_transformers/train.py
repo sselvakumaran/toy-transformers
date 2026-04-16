@@ -93,7 +93,11 @@ def estimate_loss(model, loader, n_batches: int, device: str) -> float:
 		x, y = x.to(device), y.to(device)
 		doc_ids, loss_mask = doc_ids.to(device), loss_mask.to(device)
 		with torch.autocast(device_type=device, dtype=torch.bfloat16):
-			_, loss = model(x, y, doc_ids=doc_ids, loss_mask=loss_mask)
+			if doc_ids.device.type == "cuda":
+				block_mask = model.build_flex_block_mask(doc_ids=doc_ids)
+			else:
+				block_mask = model.build_bool_mask(doc_ids)
+			_, loss = model(x, targets=y, block_mask=block_mask, loss_mask=loss_mask)
 		losses.append(loss.item())
 	return sum(losses) / len(losses) if losses else float("inf")
 
