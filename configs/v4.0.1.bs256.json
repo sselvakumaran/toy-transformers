@@ -35,8 +35,8 @@
     "path": "data/vocabs/vocab_fineweb_32k.json"
   },
   "tokens": {
-    "batch_size": 8,
-    "grad_accum_steps": 32,
+    "batch_size": 32,
+    "grad_accum_steps": 8,
     "train_steps": 2000
   },
   "val_loss": {
