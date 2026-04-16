@@ -37,7 +37,7 @@
   "tokens": {
     "batch_size": 8,
     "grad_accum_steps": 16,
-    "train_steps": 7629
+    "train_steps": 4000
   },
   "val_loss": {
     "interval": 100,
