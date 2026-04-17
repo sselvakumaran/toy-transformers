@@ -129,6 +129,8 @@ def train(
 	step = status.step
 	micro_buffer = []
 	t0 = time.time()
+	use_cuda = (device == "cuda")
+	compute_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
 	metrics = MetricsWriter(run_dir)
 	try:
 		for x, y, doc_ids, loss_mask in train_loader:
@@ -139,6 +141,11 @@ def train(
 			if len(micro_buffer) < cfg.tokens.grad_accum_steps:
 				continue
 			
+			if use_cuda:
+				e_start = torch.cuda.Event(enable_timing=True)
+				e_end = torch.cuda.Event(enable_timing=True)
+				e_start.record()
+
 			optimizer.zero_grad(set_to_none=True)
 
 			masks = []
@@ -158,6 +165,11 @@ def train(
 			grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 			optimizer.step()
 			scheduler.step()
+
+			if use_cuda:
+				e_end.record()
+				compute_events.append((e_start, e_end))
+
 			step += 1
 			micro_buffer = []
 
@@ -165,6 +177,13 @@ def train(
 			if step % cfg.run.log_interval == 0:
 				dt = time.time() - t0
 				tok_per_sec = (cfg.run.log_interval * cfg.tokens_per_step) / dt
+				if use_cuda and compute_events:
+					torch.cuda.synchronize()
+					gpu_ms = sum(s.elapsed_time(e) for s, e in compute_events)
+					gpu_frac = (gpu_ms / 1000.0) / dt
+					compute_events.clear()
+				else:
+					gpu_frac = 1.0
 				lr = scheduler.get_last_lr()[0]
 				loss_val = loss_accum.item()
 				gn_val = grad_norm.item()
@@ -172,6 +191,7 @@ def train(
 					"step": step, "t_loss": round(loss_val, 6),
 					"lr": lr, "tokens": step * cfg.tokens_per_step,
 					"grad_norm": round(gn_val, 6),
+					"gpu_frac": round(gpu_frac, 4),
 				})
 				metrics.flush()
 				print("[TRAIN]", " | ".join([
@@ -180,6 +200,7 @@ def train(
 					f"lr {lr:.2e}",
 					f"gn {gn_val:.3f}",
 					f"tok/s {tok_per_sec:.0f}",
+					f"gpu% {gpu_frac*100:.0f}",
 					f"shards {train_loader.dataset.shards_consumed}"
 				]))
 				t0 = time.time()
@@ -205,6 +226,7 @@ def train(
 				sync.push(f"runs/{cfg.run.name}/metrics.jsonl")
 				if is_best:
 					status.update(run_dir, best_val_loss=min(val_loss, status.best_val_loss))
+				compute_events.clear()
 				t0 = time.time()
 			
 			# checkpoint
