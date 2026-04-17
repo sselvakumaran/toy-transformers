@@ -1,0 +1,46 @@
+{
+  "run": {
+    "name": "v4.0.1.arch16_42_lr15e-5",
+    "log_interval": 10,
+    "save_interval": 9999999,
+    "seed": 42,
+    "description": "short ablation for 16 heads, 42 layers, lr 1.5e-4, to determine stability. this sweep uses relu^2 and GQA w/ 2heads"
+  },
+  "dataset": {
+    "dataset_folders": ["fineweb-edu-10b"],
+    "dataset_weights": [1.0]
+  },
+  "model": {
+    "model": "gptv4",
+    "config": {
+      "block_size": 1024,
+      "n_embed": 1024,
+      "n_heads": 16,
+      "n_layers": 42,
+      "n_kv_heads": 2
+    }
+  },
+  "optimizer": {
+    "max_lr": 1.5e-4,
+    "min_lr": 1.5e-5,
+    "warmup_steps": 25,
+    "weight_decay": 0.1,
+    "schedule": "linear",
+    "decay_frac": 0.0,
+    "adam_b1": 0.9,
+    "adam_b2": 0.95,
+    "adam_eps": 1e-8
+  },
+  "tokenizer": {
+    "path": "data/vocabs/vocab_fineweb_32k.json"
+  },
+  "tokens": {
+    "batch_size": 128,
+    "grad_accum_steps": 4,
+    "train_steps": 300
+  },
+  "val_loss": {
+    "interval": 25,
+    "batches": 20
+  }
+}
