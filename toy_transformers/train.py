@@ -148,14 +148,14 @@ def train(
 				else:
 					masks.append(model.build_bool_mask(mdoc))
 
-			loss_accum = 0.0
+			loss_accum = torch.zeros((), device=device)
 			for (mx, my, _, mmask), block_mask in zip(micro_buffer, masks):
 				with torch.autocast(device_type=device, dtype=torch.bfloat16):
 					_, loss = model(mx, targets=my, block_mask=block_mask, loss_mask=mmask)
 				loss = loss / cfg.tokens.grad_accum_steps
 				loss.backward()
-				loss_accum += loss.item()
-			grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item()
+				loss_accum += loss.detach()
+			grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 			optimizer.step()
 			scheduler.step()
 			step += 1
@@ -166,17 +166,19 @@ def train(
 				dt = time.time() - t0
 				tok_per_sec = (cfg.run.log_interval * cfg.tokens_per_step) / dt
 				lr = scheduler.get_last_lr()[0]
+				loss_val = loss_accum.item()
+				gn_val = grad_norm.item()
 				metrics.write({
-					"step": step, "t_loss": round(loss_accum, 6),
+					"step": step, "t_loss": round(loss_val, 6),
 					"lr": lr, "tokens": step * cfg.tokens_per_step,
-					"grad_norm": round(grad_norm, 6),
+					"grad_norm": round(gn_val, 6),
 				})
 				metrics.flush()
 				print("[TRAIN]", " | ".join([
 					f"step {step:5d}/{total_steps}",
-					f"loss {loss_accum:.4f}",
+					f"loss {loss_val:.4f}",
 					f"lr {lr:.2e}",
-					f"gn {grad_norm:.3f}",
+					f"gn {gn_val:.3f}",
 					f"tok/s {tok_per_sec:.0f}",
 					f"shards {train_loader.dataset.shards_consumed}"
 				]))
@@ -186,7 +188,7 @@ def train(
 			if step % cfg.eval.interval == 0:
 				val_loss = estimate_loss(model, val_loader, cfg.eval.batches, device)
 				is_best = val_loss < status.best_val_loss
-				clip_ratio = min(1.0, 1.0 / (grad_norm + 1e-12))
+				clip_ratio = min(1.0, 1.0 / (grad_norm.item() + 1e-12))
 				param_norm = torch.sqrt(sum(p.detach().pow(2).sum() for p in model.parameters())).item()
 				print("[TRAIN]", " | ".join([
 					f"\tval_loss {val_loss:.4f} {'(best)' if is_best else f'(best {status.best_val_loss:.4f})'}",
