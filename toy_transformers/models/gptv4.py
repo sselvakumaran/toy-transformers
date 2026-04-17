@@ -182,7 +182,8 @@ class LanguageModel(nn.Module):
 
     return create_block_mask(
       causal_mask,
-      B=B, H=None, Q_LEN=T, KV_LEN=T, device=doc_ids.device
+      B=B, H=None, Q_LEN=T, KV_LEN=T, device=doc_ids.device,
+      _compile=(doc_ids.device.type == "cuda"),
     )
 
   @staticmethod

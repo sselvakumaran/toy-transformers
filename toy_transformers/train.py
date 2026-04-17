@@ -90,8 +90,8 @@ def estimate_loss(model, loader, n_batches: int, device: str) -> float:
 	losses = []
 	for i, (x, y, doc_ids, loss_mask) in enumerate(loader):
 		if i >= n_batches: break
-		x, y = x.to(device), y.to(device)
-		doc_ids, loss_mask = doc_ids.to(device), loss_mask.to(device)
+		x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+		doc_ids, loss_mask = doc_ids.to(device, non_blocking=True), loss_mask.to(device, non_blocking=True)
 		with torch.autocast(device_type=device, dtype=torch.bfloat16):
 			if doc_ids.device.type == "cuda":
 				block_mask = model.build_flex_block_mask(doc_ids=doc_ids)
@@ -132,21 +132,25 @@ def train(
 	metrics = MetricsWriter(run_dir)
 	try:
 		for x, y, doc_ids, loss_mask in train_loader:
-			x, y = x.to(device), y.to(device)
-			doc_ids, loss_mask = doc_ids.to(device), loss_mask.to(device)
+			x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+			doc_ids, loss_mask = doc_ids.to(device, non_blocking=True), loss_mask.to(device, non_blocking=True)
 
 			micro_buffer.append((x, y, doc_ids, loss_mask))
 			if len(micro_buffer) < cfg.tokens.grad_accum_steps:
 				continue
 			
 			optimizer.zero_grad(set_to_none=True)
+
+			masks = []
+			for _, _, mdoc, _ in micro_buffer:
+				if mdoc.device.type == "cuda":
+					masks.append(model.build_flex_block_mask(doc_ids=mdoc))
+				else:
+					masks.append(model.build_bool_mask(mdoc))
+
 			loss_accum = 0.0
-			for mx, my, mdoc, mmask in micro_buffer:
+			for (mx, my, _, mmask), block_mask in zip(micro_buffer, masks):
 				with torch.autocast(device_type=device, dtype=torch.bfloat16):
-					if doc_ids.device.type == "cuda":
-						block_mask = model.build_flex_block_mask(doc_ids = mdoc)
-					else:
-						block_mask = model.build_bool_mask(doc_ids)
 					_, loss = model(mx, targets=my, block_mask=block_mask, loss_mask=mmask)
 				loss = loss / cfg.tokens.grad_accum_steps
 				loss.backward()
@@ -162,14 +166,10 @@ def train(
 				dt = time.time() - t0
 				tok_per_sec = (cfg.run.log_interval * cfg.tokens_per_step) / dt
 				lr = scheduler.get_last_lr()[0]
-				clip_ratio = min(1.0, 1.0 / (grad_norm + 1e-12))
-				param_norm = torch.sqrt(sum(p.detach().pow(2).sum() for p in model.parameters())).item()
 				metrics.write({
 					"step": step, "t_loss": round(loss_accum, 6),
 					"lr": lr, "tokens": step * cfg.tokens_per_step,
 					"grad_norm": round(grad_norm, 6),
-					"clip_ratio": round(clip_ratio, 6),
-					"param_norm": round(param_norm, 6),
 				})
 				metrics.flush()
 				print("[TRAIN]", " | ".join([
@@ -177,21 +177,27 @@ def train(
 					f"loss {loss_accum:.4f}",
 					f"lr {lr:.2e}",
 					f"gn {grad_norm:.3f}",
-					f"clip {clip_ratio:.2f}",
-					f"pn {param_norm:.1f}",
 					f"tok/s {tok_per_sec:.0f}",
 					f"shards {train_loader.dataset.shards_consumed}"
 				]))
 				t0 = time.time()
-			
+
 			# eval
 			if step % cfg.eval.interval == 0:
 				val_loss = estimate_loss(model, val_loader, cfg.eval.batches, device)
 				is_best = val_loss < status.best_val_loss
-				print("[TRAIN]", f"\tval_loss {val_loss:.4f} {'(best)' if is_best else f'(best {status.best_val_loss:.4f})'}")
+				clip_ratio = min(1.0, 1.0 / (grad_norm + 1e-12))
+				param_norm = torch.sqrt(sum(p.detach().pow(2).sum() for p in model.parameters())).item()
+				print("[TRAIN]", " | ".join([
+					f"\tval_loss {val_loss:.4f} {'(best)' if is_best else f'(best {status.best_val_loss:.4f})'}",
+					f"clip {clip_ratio:.2f}",
+					f"pn {param_norm:.1f}",
+				]))
 				metrics.write({
 					"step": step, "v_loss": round(val_loss, 6),
-					"tokens": step * cfg.tokens_per_step
+					"tokens": step * cfg.tokens_per_step,
+					"clip_ratio": round(clip_ratio, 6),
+					"param_norm": round(param_norm, 6),
 				})
 				metrics.flush()
 				sync.push(f"runs/{cfg.run.name}/metrics.jsonl")
@@ -284,8 +290,9 @@ def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 		shuffle=False, seed=cfg.run.seed,
 	)
 
-	train_loader = DataLoader(train_dataset, batch_size=cfg.tokens.batch_size, num_workers=0)
-	val_loader = DataLoader(val_dataset, batch_size=cfg.tokens.batch_size, num_workers=0, drop_last=True)
+	pin = (device == "cuda")
+	train_loader = DataLoader(train_dataset, batch_size=cfg.tokens.batch_size, num_workers=0, pin_memory=pin)
+	val_loader = DataLoader(val_dataset, batch_size=cfg.tokens.batch_size, num_workers=0, drop_last=True, pin_memory=pin)
 	print("[SETUP]", f"initialized {len(downloaders)} downloader(s) + datasets")
 
 	train(
