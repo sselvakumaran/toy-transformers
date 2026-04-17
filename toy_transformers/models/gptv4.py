@@ -1,9 +1,9 @@
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+from torch.nn.attention.flex_attention import flex_attention, create_block_mask, BlockMask
 
 # Version 4 - document masking, GQA
 
@@ -15,6 +15,8 @@ class GPTv4Config:
   n_heads: int = 8 # number of embedding heads (n_embed / n_heads MUST be an integer)
   n_embed: int = 288 # number of dimensions in embedding vector
   n_layers: int = 6 # number of blocks
+  mlp_mul: int = 4
+  activation_fn: str = "relu2"
   n_kv_heads: int = 2
   rope_base: float = 10000.0
   logit_cap: float = 30.0
@@ -102,15 +104,25 @@ class CausalSelfAttention(nn.Module):
 class MultiLayerPerceptron(nn.Module):
   def __init__(self, config: GPTv4Config):
     super().__init__()
-    self.l1 = nn.Linear(config.n_embed, 4*config.n_embed, bias=False)
-    self.proj = nn.Linear(4*config.n_embed, config.n_embed, bias=False)
+    self.activation_fn = config.activation_fn
+    n_hidden = config.mlp_mul * config.n_embed
+
+    self.l1 = nn.Linear(config.n_embed, n_hidden, bias=False)
+    if self.activation_fn == "swiglu":
+      self.l1_gate = nn.Linear(config.n_embed, n_hidden, bias=False)
+
+    self.proj = nn.Linear(n_hidden, config.n_embed, bias=False)
     self.proj.__INIT_SCALAR__ = (2 * config.n_layers) ** -0.5
 
   def forward(self, x: torch.Tensor):
-    x = self.l1(x)
-    x = F.relu(x).square()
-    x = self.proj(x)
-    return x
+    if self.activation_fn == "relu2":
+      x = F.relu(self.l1(x)).square()
+    elif self.activation_fn == "swiglu":
+      x = self.l1(x) * F.silu(self.l1_gate(x))
+    elif self.activation_fn == "gelu":
+      x = F.gelu(self.l1(x))
+    else: raise ValueError(f"unknown activation function {self.activation_fn}")
+    return self.proj(x)
 
 
 class TransformerBlock(nn.Module):
@@ -160,8 +172,7 @@ class LanguageModel(nn.Module):
     self.token_embed.weight = self.head.weight
 
   @staticmethod
-  @torch.compiler.disable
-  def _build_flex_block_mask(doc_ids: torch.Tensor):
+  def build_flex_block_mask(doc_ids: torch.Tensor):
     B, T = doc_ids.shape
 
     def causal_mask(b, h, q_idx, kv_idx):
@@ -175,7 +186,7 @@ class LanguageModel(nn.Module):
     )
 
   @staticmethod
-  def _build_bool_mask(doc_ids: torch.Tensor) -> torch.Tensor:
+  def build_bool_mask(doc_ids: torch.Tensor) -> torch.Tensor:
     """Causal + doc-boundary boolean mask — fallback for non-CUDA devices."""
     _, T = doc_ids.shape
     causal = torch.ones(T, T, dtype=torch.bool, device=doc_ids.device).tril()
@@ -183,20 +194,12 @@ class LanguageModel(nn.Module):
     return (causal.unsqueeze(0) & doc).unsqueeze(1)    # (B, 1, T, T)
 
   def forward(self,
-    idx: torch.Tensor, targets=None,
-    doc_ids: Optional[torch.Tensor] = None,
+    idx: torch.Tensor, targets=None, block_mask: Optional[Union[torch.Tensor, BlockMask]] = None,
     loss_mask: Optional[torch.Tensor] = None,
     eval_logits: bool = False
   ):
     _, T = idx.size() # number of batches, token sequence
     block_size = self.config.block_size
-
-    block_mask = None
-    if doc_ids is not None:
-      if doc_ids.device.type == "cuda":
-        block_mask = self._build_flex_block_mask(doc_ids)
-      else:
-        block_mask = self._build_bool_mask(doc_ids)
 
     idx: torch.Tensor = idx if T <= block_size else idx[:, -block_size:]
 

@@ -1,0 +1,84 @@
+"""
+Download + reformat winogrande into CF eval format.
+
+Dataset: allenai/winogrande / winogrande_debiased / validation
+Format: sentence has "_" blank, two options. Split at blank,
+  question = everything before _, answers = [option + rest, option + rest]
+
+Usage:
+  python experiments/preprocessing/winogrande/prepare.py
+  python experiments/preprocessing/winogrande/prepare.py --bucket my-bucket
+"""
+import argparse
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+from tqdm import tqdm
+
+from toy_transformers.data import S3Sync
+from toy_transformers.prepare_eval import run_download, run_upload
+
+REPO_ROOT = Path(__file__).parent.parent.parent.parent
+DATA_DIR = REPO_ROOT / "data"
+
+DATASET_ID = "allenai/winogrande"
+SUBSET = "winogrande_debiased"
+SPLIT = "train"
+EVAL_NAME = "winogrande"
+
+
+def run_reformat(raw_dir: Path, out_path: Path):
+	print("[REFORMAT]", "winogrande -> CF format")
+
+	questions, answers, labels = [], [], []
+	skipped = 0
+
+	for pf_path in sorted(raw_dir.glob("*.parquet")):
+		table = pq.read_table(pf_path)
+		for i in range(len(table)):
+			sentence = table["sentence"][i].as_py()
+			option1 = table["option1"][i].as_py()
+			option2 = table["option2"][i].as_py()
+			label = table["answer"][i].as_py()
+
+			if label is None or label == "" or "_" not in sentence:
+				skipped += 1
+				continue
+
+			before, after = sentence.split("_", 1)
+			questions.append(before.rstrip())
+			answers.append([
+				option1 + after,
+				option2 + after,
+			])
+			labels.append(int(label) - 1)  # 1-indexed -> 0-indexed
+
+	out_table = pa.table({
+		"question": pa.array(questions, type=pa.string()),
+		"answers": pa.array(answers, type=pa.list_(pa.string())),
+		"label": pa.array(labels, type=pa.int32()),
+	})
+
+	out_path.parent.mkdir(parents=True, exist_ok=True)
+	pq.write_table(out_table, out_path)
+	print("[REFORMAT]", f"{len(labels)} examples written, {skipped} skipped -> {out_path}")
+
+
+def main():
+	parser = argparse.ArgumentParser(description="prepare winogrande eval")
+	parser.add_argument("--bucket", type=str, default=None, help="S3 bucket name")
+	args = parser.parse_args()
+
+	eval_dir = DATA_DIR / "evals" / EVAL_NAME
+	eval_dir.mkdir(parents=True, exist_ok=True)
+	raw_dir = eval_dir / "_raw"
+	eval_parquet = eval_dir / f"{EVAL_NAME}.parquet"
+
+	run_download(DATASET_ID, SUBSET, SPLIT, raw_dir)
+	run_reformat(raw_dir, eval_parquet)
+	if args.bucket:
+		run_upload(eval_dir, args.bucket)
+
+if __name__ == "__main__":
+	main()

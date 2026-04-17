@@ -34,9 +34,11 @@ def setup_data(cfg: TrainingConfig, sync: S3Sync) -> tuple[dict, Path]:
 	return metadatas, val_path
 
 def compute_total_steps(cfg: TrainingConfig) -> int:
-	if cfg.tokens.train_tokens <= 0:
-		raise ValueError("train_tokens invalid")
-	return cfg.tokens.train_tokens // cfg.tokens_per_step
+	if cfg.tokens.train_steps > 0:
+		return cfg.tokens.train_steps
+	if cfg.tokens.train_tokens > 0:
+		return cfg.tokens.train_tokens // cfg.tokens_per_step
+	raise ValueError("train_tokens invalid")
 
 def setup_model(cfg: TrainingConfig, total_steps: int, device: str):
 	torch.set_float32_matmul_precision("medium")
@@ -45,6 +47,7 @@ def setup_model(cfg: TrainingConfig, total_steps: int, device: str):
 	model.compile()
 	optimizer = cfg.optimizer.build_optimizer(model)
 	scheduler = cfg.optimizer.build_scheduler(optimizer, total_steps)
+	print("[SETUP]", "model, optimizer, scheduler built")
 	return model, optimizer, scheduler
 
 def maybe_resume(run_dir: Path, cfg, model, optimizer, scheduler, sync: S3Sync, device: str) -> RunStatus:
@@ -73,6 +76,12 @@ def maybe_resume(run_dir: Path, cfg, model, optimizer, scheduler, sync: S3Sync, 
 	else:
 		print("[RESUME]", "starting fresh")
 		status = RunStatus()
+
+	metrics_rel = f"{s3_run}/metrics.jsonl"
+	metrics_local = run_dir / "metrics.jsonl"
+	if not metrics_local.exists() and sync.exists(metrics_rel):
+		print("[RESUME]", "pulling metrics.jsonl from S3...")
+		sync.pull(metrics_rel)
 	return status
 
 
@@ -84,7 +93,11 @@ def estimate_loss(model, loader, n_batches: int, device: str) -> float:
 		x, y = x.to(device), y.to(device)
 		doc_ids, loss_mask = doc_ids.to(device), loss_mask.to(device)
 		with torch.autocast(device_type=device, dtype=torch.bfloat16):
-			_, loss = model(x, y, doc_ids=doc_ids, loss_mask=loss_mask)
+			if doc_ids.device.type == "cuda":
+				block_mask = model.build_flex_block_mask(doc_ids=doc_ids)
+			else:
+				block_mask = model.build_bool_mask(doc_ids)
+			_, loss = model(x, targets=y, block_mask=block_mask, loss_mask=loss_mask)
 		losses.append(loss.item())
 	return sum(losses) / len(losses) if losses else float("inf")
 
@@ -130,11 +143,15 @@ def train(
 			loss_accum = 0.0
 			for mx, my, mdoc, mmask in micro_buffer:
 				with torch.autocast(device_type=device, dtype=torch.bfloat16):
-					_, loss = model(mx, my, doc_ids=mdoc, loss_mask=mmask)
+					if doc_ids.device.type == "cuda":
+						block_mask = model.build_flex_block_mask(doc_ids = mdoc)
+					else:
+						block_mask = model.build_bool_mask(doc_ids)
+					_, loss = model(mx, targets=my, block_mask=block_mask, loss_mask=mmask)
 				loss = loss / cfg.tokens.grad_accum_steps
 				loss.backward()
 				loss_accum += loss.item()
-			torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+			grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item()
 			optimizer.step()
 			scheduler.step()
 			step += 1
@@ -145,15 +162,23 @@ def train(
 				dt = time.time() - t0
 				tok_per_sec = (cfg.run.log_interval * cfg.tokens_per_step) / dt
 				lr = scheduler.get_last_lr()[0]
+				clip_ratio = min(1.0, 1.0 / (grad_norm + 1e-12))
+				param_norm = torch.sqrt(sum(p.detach().pow(2).sum() for p in model.parameters())).item()
 				metrics.write({
 					"step": step, "t_loss": round(loss_accum, 6),
-					"lr": lr, "tokens": step * cfg.tokens_per_step
+					"lr": lr, "tokens": step * cfg.tokens_per_step,
+					"grad_norm": round(grad_norm, 6),
+					"clip_ratio": round(clip_ratio, 6),
+					"param_norm": round(param_norm, 6),
 				})
 				metrics.flush()
 				print("[TRAIN]", " | ".join([
 					f"step {step:5d}/{total_steps}",
 					f"loss {loss_accum:.4f}",
 					f"lr {lr:.2e}",
+					f"gn {grad_norm:.3f}",
+					f"clip {clip_ratio:.2f}",
+					f"pn {param_norm:.1f}",
 					f"tok/s {tok_per_sec:.0f}",
 					f"shards {train_loader.dataset.shards_consumed}"
 				]))
@@ -261,6 +286,7 @@ def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 
 	train_loader = DataLoader(train_dataset, batch_size=cfg.tokens.batch_size, num_workers=0)
 	val_loader = DataLoader(val_dataset, batch_size=cfg.tokens.batch_size, num_workers=0, drop_last=True)
+	print("[SETUP]", f"initialized {len(downloaders)} downloader(s) + datasets")
 
 	train(
 		cfg, model, optimizer, scheduler,
@@ -270,10 +296,16 @@ def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser()
-	parser.add_argument("config", help="path to config JSON")
+	parser.add_argument("config", help="config name (resolved under configs/, .json optional) or explicit path")
 	parser.add_argument("bucket", help="S3 bucket/base name, can include subdirectories")
 	parser.add_argument("--device", default="cuda")
 	args = parser.parse_args()
-	
-	cfg = TrainingConfig.from_json(args.config)
+
+	config_path = Path(args.config)
+	if not config_path.exists():
+		candidate = REPO_ROOT / "configs" / args.config
+		if candidate.suffix != ".json":
+			candidate = candidate.with_suffix(".json")
+		config_path = candidate
+	cfg = TrainingConfig.from_json(str(config_path))
 	train_from_config(cfg=cfg, bucket=args.bucket, device=args.device)

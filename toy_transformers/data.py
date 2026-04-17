@@ -31,7 +31,9 @@ class S3Sync():
   def _local(self, rel: str | Path) -> Path:
     return self.local_root / rel
 
-  def push(self, rel: str | Path, dry_run = False) -> bool:
+  def push(self, rel: str | Path, dry_run = False, skip_existing = False) -> bool:
+    if skip_existing and self.exists(rel):
+      return True
     local, remote = self._local(rel), self._remote(rel)
     cmd = ["aws", "s3",
       "cp" if local.is_file() else "sync",
@@ -40,7 +42,7 @@ class S3Sync():
     if dry_run:
       print("dry-run:", " ".join(cmd))
       return True
-    
+
     r = subprocess.run(cmd, check=False, capture_output=True, text=True)
     if r.returncode != 0:
       print(f"push failed: {r.stderr}")
