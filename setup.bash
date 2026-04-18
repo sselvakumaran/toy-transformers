@@ -146,6 +146,9 @@ fi
 
 # ── extra deps ──
 pip_install --quiet numpy tqdm pyarrow awscli
+if [[ $HAS_GPU -eq 1 ]]; then
+  pip_install --quiet liger-kernel
+fi
 
 # make sure the pip-installed aws is on PATH (--user installs land in ~/.local/bin)
 if ! command -v aws >/dev/null 2>&1; then

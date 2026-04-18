@@ -44,7 +44,10 @@ def setup_model(cfg: TrainingConfig, total_steps: int, device: str):
 	torch.set_float32_matmul_precision("medium")
 	model = cfg.model.build_model(vocab_size=cfg.tokenizer.vocab_size, device=device)
 	print("[SETUP]", f"{model.get_num_parameters(as_str=True)} parameters")
-	model.compile()
+	if device == "cuda":
+		model.compile(mode="max-autotune-no-cudagraphs")
+	else:
+		model.compile()
 	optimizer = cfg.optimizer.build_optimizer(model)
 	scheduler = cfg.optimizer.build_scheduler(optimizer, total_steps)
 	print("[SETUP]", "model, optimizer, scheduler built")

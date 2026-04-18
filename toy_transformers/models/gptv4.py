@@ -7,6 +7,13 @@ from torch.nn.attention.flex_attention import flex_attention, create_block_mask,
 
 # Version 4 - document masking, GQA
 
+LigerFusedLinearCrossEntropyLoss = None
+if torch.cuda.is_available():
+  try:
+    from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
+  except ImportError:
+    pass
+
 @dataclass(frozen=True)
 class GPTv4Config:
   vocab_size: int
@@ -171,6 +178,10 @@ class LanguageModel(nn.Module):
     # tie weights after init
     self.token_embed.weight = self.head.weight
 
+    self._liger_ce = None
+    if config.logit_cap <= 0 and LigerFusedLinearCrossEntropyLoss is not None and config.device == "cuda":
+      self._liger_ce = LigerFusedLinearCrossEntropyLoss(reduction='none')
+
   @staticmethod
   def build_flex_block_mask(doc_ids: torch.Tensor):
     B, T = doc_ids.shape
@@ -215,11 +226,21 @@ class LanguageModel(nn.Module):
     x = self.ln(x)
     
     if targets is None and not eval_logits: x = x[:, [-1], :]
-    logits = self.head(x)
-    logits = self.config.logit_cap * torch.tanh(logits / self.config.logit_cap)
 
-    if targets is None: return logits, None
-    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
+    use_liger = (
+      self._liger_ce is not None and targets is not None
+      and not eval_logits and x.is_cuda
+    )
+    if use_liger:
+      loss = self._liger_ce(self.head.weight, x.reshape(-1, x.size(-1)), targets.view(-1))
+      logits = None
+    else:
+      logits = self.head(x)
+      if self.config.logit_cap > 0:
+        logits = self.config.logit_cap * torch.tanh(logits / self.config.logit_cap)
+      if targets is None: return logits, None
+      loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
+
     if loss_mask is not None:
       loss = (loss * loss_mask.view(-1).float()).sum() / loss_mask.sum().clamp(min=1)
     else:
