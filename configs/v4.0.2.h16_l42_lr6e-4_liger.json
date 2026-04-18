@@ -1,6 +1,6 @@
 {
   "run": {
-    "name": "v4.0.2.arch16_42_lr6e-4",
+    "name": "v4.0.2.arch16_42_lr6e-4_liger",
     "log_interval": 10,
     "save_interval": 9999999,
     "seed": 42,
