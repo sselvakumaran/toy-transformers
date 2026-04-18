@@ -1,16 +1,20 @@
 from dataclasses import dataclass
-from typing import Dict, Optional, Union
+from typing import Dict, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.attention.flex_attention import flex_attention, create_block_mask, BlockMask
 
 # Version 4 - document masking, GQA
 
 LigerFusedLinearCrossEntropyLoss = None
+flash_attn_varlen_func = None
 if torch.cuda.is_available():
   try:
     from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
+  except ImportError:
+    pass
+  try:
+    from flash_attn import flash_attn_varlen_func
   except ImportError:
     pass
 
@@ -87,8 +91,11 @@ class CausalSelfAttention(nn.Module):
     # self.kv_proj.__INIT_SCALAR__ = pow((2 * config.n_layers), -0.5)
     self.proj.__INIT_SCALAR__ = pow((2 * config.n_layers), -0.5)
 
-  def forward(self, x: torch.Tensor, block_mask = None):
-    # get k,q,v linear block
+  def forward(self, x: torch.Tensor, attn_info=None):
+    # attn_info is one of:
+    #   None                       -> pure causal (no doc mask)
+    #   (cu_seqlens, max_seqlen)   -> CUDA + flash-attn varlen path (doc-masked)
+    #   bool tensor (B,1,T,T)      -> SDPA fallback path (doc-masked, non-CUDA or no flash-attn)
     B, T, _ = x.size() # assuming C == self.n_embed
 
     q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
@@ -99,13 +106,19 @@ class CausalSelfAttention(nn.Module):
 
     q, k = self.rope(q, k)
 
-    if block_mask is not None and not isinstance(block_mask, torch.Tensor):
-      y = flex_attention(q, k, v, block_mask=block_mask, enable_gqa=True)
+    if isinstance(attn_info, tuple):
+      cu_seqlens, max_seqlen = attn_info
+      # (B,H,T,D) -> (B,T,H,D) -> (B*T,H,D)
+      qf = q.transpose(1, 2).reshape(B * T, self.n_heads, self.head_dim)
+      kf = k.transpose(1, 2).reshape(B * T, self.n_kv_heads, self.head_dim)
+      vf = v.transpose(1, 2).reshape(B * T, self.n_kv_heads, self.head_dim)
+      y = flash_attn_varlen_func(qf, kf, vf, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen, causal=True)
+      y = y.view(B, T, self.n_heads, self.head_dim)
     else:
-      # block_mask is either None (pure causal) or a bool (B,1,T,T) tensor (non-CUDA fallback)
-      y = F.scaled_dot_product_attention(q, k, v, attn_mask=block_mask, is_causal=block_mask is None, enable_gqa=True)
-    y = y.transpose(1, 2).contiguous().view(B, T, self.n_embed)
-    return self.proj(y)
+      # attn_info is either None (pure causal) or a bool (B,1,T,T) tensor
+      y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_info, is_causal=attn_info is None, enable_gqa=True)
+      y = y.transpose(1, 2).contiguous()
+    return self.proj(y.reshape(B, T, self.n_embed))
 
 
 class MultiLayerPerceptron(nn.Module):
@@ -140,9 +153,9 @@ class TransformerBlock(nn.Module):
     self.norm2 = nn.RMSNorm(config.n_embed)
     self.mlp = MultiLayerPerceptron(config)
 
-  def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None):
+  def forward(self, x: torch.Tensor, attn_info=None):
     # residual connections
-    attn_add = self.attn(self.norm1(x), attn_mask)
+    attn_add = self.attn(self.norm1(x), attn_info)
     x = torch.add(x, attn_add)
     mlp_add = self.mlp(self.norm2(x))
     x = torch.add(x, mlp_add)
@@ -183,30 +196,30 @@ class LanguageModel(nn.Module):
       self._liger_ce = LigerFusedLinearCrossEntropyLoss(reduction='none')
 
   @staticmethod
-  def build_flex_block_mask(doc_ids: torch.Tensor):
+  def build_attn_info(doc_ids: torch.Tensor, block_size: int):
+    """Build attention metadata from doc_ids.
+    CUDA: returns (cu_seqlens, max_seqlen) for flash_attn_varlen_func.
+    Non-CUDA: returns a (B, 1, T, T) bool mask for SDPA.
+    """
     B, T = doc_ids.shape
+    if doc_ids.device.type != "cuda" or flash_attn_varlen_func is None:
+      causal = torch.ones(T, T, dtype=torch.bool, device=doc_ids.device).tril()
+      doc = doc_ids.unsqueeze(2) == doc_ids.unsqueeze(1)
+      return (causal.unsqueeze(0) & doc).unsqueeze(1)
 
-    def causal_mask(b, h, q_idx, kv_idx):
-      causal = q_idx >= kv_idx
-      same_doc = doc_ids[b, q_idx] == doc_ids[b, kv_idx]
-      return causal & same_doc
-
-    return create_block_mask(
-      causal_mask,
-      B=B, H=None, Q_LEN=T, KV_LEN=T, device=doc_ids.device,
-      _compile=(doc_ids.device.type == "cuda"),
-    )
-
-  @staticmethod
-  def build_bool_mask(doc_ids: torch.Tensor) -> torch.Tensor:
-    """Causal + doc-boundary boolean mask — fallback for non-CUDA devices."""
-    _, T = doc_ids.shape
-    causal = torch.ones(T, T, dtype=torch.bool, device=doc_ids.device).tril()
-    doc = doc_ids.unsqueeze(2) == doc_ids.unsqueeze(1)  # (B, T, T)
-    return (causal.unsqueeze(0) & doc).unsqueeze(1)    # (B, 1, T, T)
+    flat = doc_ids.reshape(-1)
+    pos = torch.arange(B * T, device=doc_ids.device)
+    sample_start = (pos % T == 0)
+    within = torch.zeros_like(flat, dtype=torch.bool)
+    within[1:] = flat[1:] != flat[:-1]
+    within = within & ~sample_start
+    starts = pos[sample_start | within]
+    end = torch.tensor([B * T], device=doc_ids.device, dtype=starts.dtype)
+    cu_seqlens = torch.cat([starts, end]).to(torch.int32)
+    return cu_seqlens, block_size
 
   def forward(self,
-    idx: torch.Tensor, targets=None, block_mask: Optional[Union[torch.Tensor, BlockMask]] = None,
+    idx: torch.Tensor, targets=None, attn_info=None,
     loss_mask: Optional[torch.Tensor] = None,
     eval_logits: bool = False
   ):
@@ -219,10 +232,10 @@ class LanguageModel(nn.Module):
     x = tok_e
     if self.config.checkpoint:
       for block in self.blocks:
-        x = torch.utils.checkpoint.checkpoint(block, x, block_mask)
+        x = torch.utils.checkpoint.checkpoint(block, x, attn_info)
     else:
       for block in self.blocks:
-        x = block(x, block_mask)
+        x = block(x, attn_info)
     x = self.ln(x)
     
     if targets is None and not eval_logits: x = x[:, [-1], :]

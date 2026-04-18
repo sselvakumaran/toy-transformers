@@ -44,10 +44,7 @@ def setup_model(cfg: TrainingConfig, total_steps: int, device: str):
 	torch.set_float32_matmul_precision("medium")
 	model = cfg.model.build_model(vocab_size=cfg.tokenizer.vocab_size, device=device)
 	print("[SETUP]", f"{model.get_num_parameters(as_str=True)} parameters")
-	if device == "cuda":
-		model.compile(mode="max-autotune-no-cudagraphs")
-	else:
-		model.compile()
+	model.compile()
 	optimizer = cfg.optimizer.build_optimizer(model)
 	scheduler = cfg.optimizer.build_scheduler(optimizer, total_steps)
 	print("[SETUP]", "model, optimizer, scheduler built")
@@ -96,11 +93,8 @@ def estimate_loss(model, loader, n_batches: int, device: str) -> float:
 		x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
 		doc_ids, loss_mask = doc_ids.to(device, non_blocking=True), loss_mask.to(device, non_blocking=True)
 		with torch.autocast(device_type=device, dtype=torch.bfloat16):
-			if doc_ids.device.type == "cuda":
-				block_mask = model.build_flex_block_mask(doc_ids=doc_ids)
-			else:
-				block_mask = model.build_bool_mask(doc_ids)
-			_, loss = model(x, targets=y, block_mask=block_mask, loss_mask=loss_mask)
+			attn_info = model.build_attn_info(doc_ids, doc_ids.shape[1])
+			_, loss = model(x, targets=y, attn_info=attn_info, loss_mask=loss_mask)
 		losses.append(loss.item())
 	return sum(losses) / len(losses) if losses else float("inf")
 
@@ -144,17 +138,12 @@ def train(
 			
 			optimizer.zero_grad(set_to_none=True)
 
-			masks = []
-			for _, _, mdoc, _ in micro_buffer:
-				if mdoc.device.type == "cuda":
-					masks.append(model.build_flex_block_mask(doc_ids=mdoc))
-				else:
-					masks.append(model.build_bool_mask(mdoc))
+			attn_infos = [model.build_attn_info(mdoc, mdoc.shape[1]) for _, _, mdoc, _ in micro_buffer]
 
 			loss_accum = torch.zeros((), device=device)
-			for (mx, my, _, mmask), block_mask in zip(micro_buffer, masks):
+			for (mx, my, _, mmask), attn_info in zip(micro_buffer, attn_infos):
 				with torch.autocast(device_type=device, dtype=torch.bfloat16):
-					_, loss = model(mx, targets=my, block_mask=block_mask, loss_mask=mmask)
+					_, loss = model(mx, targets=my, attn_info=attn_info, loss_mask=mmask)
 				loss = loss / cfg.tokens.grad_accum_steps
 				loss.backward()
 				loss_accum += loss.detach()

@@ -148,6 +148,24 @@ fi
 pip_install --quiet numpy tqdm pyarrow awscli
 if [[ $HAS_GPU -eq 1 ]]; then
   pip_install --quiet liger-kernel
+
+  # flash-attn: PyPI only ships sdist (build takes 5-20 min even w/ ninja, and needs nvcc).
+  # Prebuilt wheels live on GitHub releases: one cu12 wheel covers all CUDA 12.x drivers.
+  # We match py tag + torch major.minor + cxx11abi to the currently-installed torch.
+  FA_VER="2.8.3"
+  FA_PY_TAG=$($PY -c "import sys;print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+  FA_ABI=$($PY -c "import torch;print('TRUE' if torch._C._GLIBCXX_USE_CXX11_ABI else 'FALSE')")
+  FA_TORCH_MM=$($PY -c "import torch;v=torch.__version__.split('+')[0].split('.');print(f'{v[0]}.{v[1]}')")
+  FA_WHL="flash_attn-${FA_VER}+cu12torch${FA_TORCH_MM}cxx11abi${FA_ABI}-${FA_PY_TAG}-${FA_PY_TAG}-linux_x86_64.whl"
+  FA_URL="https://github.com/Dao-AILab/flash-attention/releases/download/v${FA_VER}/${FA_WHL}"
+  echo "[SETUP] flash-attn: trying prebuilt wheel"
+  echo "        $FA_WHL"
+  if ! pip_install "$FA_URL"; then
+    echo "[SETUP] prebuilt wheel unavailable, building from source (slow: ~5-20 min)"
+    pip_install --quiet ninja packaging
+    MAX_JOBS=4 pip_install --no-build-isolation flash-attn
+  fi
+  $PY -c "import flash_attn; print(f'[SETUP] flash-attn {flash_attn.__version__} ok')"
 fi
 
 # make sure the pip-installed aws is on PATH (--user installs land in ~/.local/bin)
