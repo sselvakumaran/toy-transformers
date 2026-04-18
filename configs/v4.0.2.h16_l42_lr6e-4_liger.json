@@ -18,8 +18,7 @@
       "n_heads": 16,
       "n_layers": 42,
       "n_kv_heads": 2,
-      "logit_cap": -1,
-      "checkpoint": true
+      "logit_cap": -1
     }
   },
   "optimizer": {
