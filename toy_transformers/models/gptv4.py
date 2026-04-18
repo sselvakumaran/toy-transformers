@@ -213,9 +213,15 @@ class LanguageModel(nn.Module):
     within = torch.zeros_like(flat, dtype=torch.bool)
     within[1:] = flat[1:] != flat[:-1]
     within = within & ~sample_start
-    starts = pos[sample_start | within]
-    end = torch.tensor([B * T], device=doc_ids.device, dtype=starts.dtype)
-    cu_seqlens = torch.cat([starts, end]).to(torch.int32)
+    is_start = sample_start | within
+    # Fixed-length output for CUDA graph compatibility: pack valid start
+    # positions to the front via sort; filler slots hold B*T so trailing
+    # segments are zero-length (FA varlen skips them). Total length: B*T+1.
+    filler = torch.full_like(pos, B * T)
+    packed = torch.where(is_start, pos, filler)
+    sorted_pos, _ = torch.sort(packed)
+    end = torch.tensor([B * T], device=doc_ids.device, dtype=sorted_pos.dtype)
+    cu_seqlens = torch.cat([sorted_pos, end]).to(torch.int32)
     return cu_seqlens, block_size
 
   def forward(self,
@@ -232,7 +238,7 @@ class LanguageModel(nn.Module):
     x = tok_e
     if self.config.checkpoint:
       for block in self.blocks:
-        x = torch.utils.checkpoint.checkpoint(block, x, attn_info)
+        x = torch.utils.checkpoint.checkpoint(block, x, attn_info, use_reentrant=False)
     else:
       for block in self.blocks:
         x = block(x, attn_info)
