@@ -1,11 +1,16 @@
 import argparse
 import json
 import multiprocessing as mp
+import os
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
+import torch._dynamo
 from torch.utils.data import DataLoader
+
+torch._dynamo.config.capture_scalar_outputs = True
 
 from toy_transformers.config import TrainingConfig
 from toy_transformers.data import S3Sync, S3ShardDownloader, AggregateDataset, ShardDataset
@@ -112,6 +117,25 @@ def train(
 ):
 	print("[TRAIN]", f"{total_steps:,} total steps, {cfg.tokens_per_step:,} tokens/step")
 
+	# optional profiler: TT_PROFILE_STEPS=N enables; N = number of *active* steps recorded.
+	# schedule: 2 wait + 3 warmup + N active. Prints a summary + writes chrome-trace, then returns.
+	profile_steps = int(os.environ.get("TT_PROFILE_STEPS", "0"))
+	if profile_steps > 0:
+		trace_dir = run_dir / "profile"
+		trace_dir.mkdir(exist_ok=True)
+		prof_ctx = torch.profiler.profile(
+			activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+			schedule=torch.profiler.schedule(wait=2, warmup=3, active=profile_steps, repeat=1),
+			on_trace_ready=torch.profiler.tensorboard_trace_handler(str(trace_dir)),
+			record_shapes=False,
+			with_stack=False,
+		)
+		profile_finish_step = status.step + 2 + 3 + profile_steps
+		print("[PROFILE]", f"enabled: 2 wait + 3 warmup + {profile_steps} active, trace -> {trace_dir}")
+	else:
+		prof_ctx = nullcontext()
+		profile_finish_step = -1
+
 	def save_checkpoint(name: str):
 		path = run_dir / "checkpoints" / name
 		save_model(path, model, optimizer, scheduler)
@@ -127,6 +151,7 @@ def train(
 	micro_buffer = []
 	t0 = time.time()
 	metrics = MetricsWriter(run_dir)
+	prof = prof_ctx.__enter__() if profile_steps > 0 else None
 	try:
 		for x, y, doc_ids, loss_mask in train_loader:
 			x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
@@ -152,6 +177,17 @@ def train(
 			scheduler.step()
 			step += 1
 			micro_buffer = []
+
+			if prof is not None:
+				prof.step()
+				if step >= profile_finish_step:
+					print("[PROFILE]", "dumping summary (top 30 by self-cuda time):")
+					print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=30))
+					prof_ctx.__exit__(None, None, None)
+					prof = None
+					metrics.close()
+					stop_downloaders()
+					return
 
 			# logging
 			if step % cfg.run.log_interval == 0:
@@ -213,7 +249,7 @@ def train(
 	
 	except KeyboardInterrupt:
 		print("[CLEANUP]", f"interrupted at step {step}")
-		status.update(run_dir, step=step, shards_consumed=train_loader.dataset.shards_consumed, status="running", 
+		status.update(run_dir, step=step, shards_consumed=train_loader.dataset.shards_consumed, status="running",
 			dataset_shards={
 				folder: train_loader.dataset.source_shards_consumed[i]
 				for i, folder in enumerate(cfg.dataset.dataset_folders)
@@ -223,10 +259,12 @@ def train(
 		sync.push(f"runs/{cfg.run.name}/metrics.jsonl")
 		sync.push(f"runs/{cfg.run.name}/status.json")
 		stop_downloaders()
+		if prof is not None: prof_ctx.__exit__(None, None, None)
 		return
-	
+
 	metrics.close()
 	stop_downloaders()
+	if prof is not None: prof_ctx.__exit__(None, None, None)
 	
 	status.update(run_dir, step=step, shards_consumed=train_loader.dataset.shards_consumed, status="completed",
 		dataset_shards={
