@@ -168,6 +168,8 @@ def train(
 
 			loss_accum = torch.zeros((), device=device)
 			for (mx, my, _, mmask), attn_info in zip(micro_buffer, attn_infos):
+				if device == "cuda":
+					torch.compiler.cudagraph_mark_step_begin()
 				with torch.autocast(device_type=device, dtype=torch.bfloat16):
 					_, loss = model(mx, targets=my, attn_info=attn_info, loss_mask=mmask)
 				loss = loss / cfg.tokens.grad_accum_steps
