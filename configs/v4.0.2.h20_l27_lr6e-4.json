@@ -13,8 +13,8 @@
   "model": {
     "model": "gptv4",
     "config": {
-      "block_size": 1280,
-      "n_embed": 896,
+      "block_size": 1024,
+      "n_embed": 1280,
       "n_heads": 20,
       "n_layers": 27,
       "n_kv_heads": 2
