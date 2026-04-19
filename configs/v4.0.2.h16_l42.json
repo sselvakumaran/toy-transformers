@@ -2,9 +2,9 @@
   "run": {
     "name": "v4.0.2.h16_l42",
     "log_interval": 10,
-    "save_interval": 3000,
+    "save_interval": 1250,
     "seed": 42,
-    "description": "ablation for 16 heads, 42 layers, lr 3e-4. this sweep uses relu^2 and GQA w/ 2heads"
+    "description": "ablation for 16 heads, 42 layers. this sweep uses relu^2 and GQA w/ 2heads"
   },
   "dataset": {
     "dataset_folders": ["fineweb-edu-10b"],
@@ -35,12 +35,12 @@
     "path": "data/vocabs/vocab_fineweb_32k.json"
   },
   "tokens": {
-    "batch_size": 128,
-    "grad_accum_steps": 4,
+    "batch_size": 32,
+    "grad_accum_steps": 16,
     "train_steps": 2500
   },
   "val_loss": {
-    "interval": 50,
+    "interval": 100,
     "batches": 20
   }
 }
