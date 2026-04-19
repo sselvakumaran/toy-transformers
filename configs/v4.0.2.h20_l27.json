@@ -1,6 +1,6 @@
 {
   "run": {
-    "name": "v4.0.1.arch20_27",
+    "name": "v4.0.2.h20_l27",
     "log_interval": 10,
     "save_interval": 2500,
     "seed": 42,
