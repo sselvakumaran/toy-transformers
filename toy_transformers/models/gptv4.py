@@ -216,7 +216,8 @@ class LanguageModel(nn.Module):
     
     if targets is None and not eval_logits: x = x[:, [-1], :]
     logits = self.head(x)
-    logits = self.config.logit_cap * torch.tanh(logits / self.config.logit_cap)
+    if self.config.logit_cap > 0.0:
+      logits = self.config.logit_cap * torch.tanh(logits / self.config.logit_cap)
 
     if targets is None: return logits, None
     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')

@@ -1,0 +1,48 @@
+{
+  "run": {
+    "name": "v4.0.3.swiglu",
+    "log_interval": 10,
+    "save_interval": 1250,
+    "seed": 42,
+    "description": "ablation for swiglu, not changing number of parameters (so have to decrease number of layers)"
+  },
+  "dataset": {
+    "dataset_folders": ["fineweb-edu-10b"],
+    "dataset_weights": [1.0]
+  },
+  "model": {
+    "model": "gptv4",
+    "config": {
+      "block_size": 1024,
+      "n_embed": 1024,
+      "n_heads": 16,
+      "n_layers": 31,
+      "n_kv_heads": 2,
+      "activation_fn": "swiglu",
+      "logit_cap": -1
+    }
+  },
+  "optimizer": {
+    "max_lr": 6e-4,
+    "min_lr": 6e-5,
+    "warmup_steps": 250,
+    "weight_decay": 0.1,
+    "schedule": "linear",
+    "decay_frac": 0.0,
+    "adam_b1": 0.9,
+    "adam_b2": 0.95,
+    "adam_eps": 1e-8
+  },
+  "tokenizer": {
+    "path": "data/vocabs/vocab_fineweb_32k.json"
+  },
+  "tokens": {
+    "batch_size": 32,
+    "grad_accum_steps": 16,
+    "train_steps": 2500
+  },
+  "val_loss": {
+    "interval": 100,
+    "batches": 20
+  }
+}
