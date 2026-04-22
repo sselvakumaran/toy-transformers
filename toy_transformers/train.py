@@ -257,7 +257,10 @@ def train(
 	
 	metrics.close()
 	stop_downloaders()
-	
+
+	if step < total_steps:
+		print("[TRAIN]", f"ended early at step {step}/{total_steps} — a dataset was fully consumed")
+
 	status.update(run_dir, step=step, shards_consumed=train_loader.dataset.shards_consumed, status="completed",
 		dataset_shards={
 			folder: train_loader.dataset.source_shards_consumed[i]

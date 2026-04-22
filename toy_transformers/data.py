@@ -138,18 +138,25 @@ class S3ShardDownloader(mp.Process):
 
   def run(self):
     try:
-      cycle = 0
+      n = len(self.shards)
+      if n == 0:
+        self.queue.put(_SENTINEL)
+        return
+      start_cycle = self.skip_shards // n
+      start_pos = self.skip_shards % n
+      cycle = start_cycle
       while True:
         order = self.shards.copy()
         if self.shuffle:
           random.Random(self.seed + cycle).shuffle(order)
 
-        skip = self.skip_shards if cycle == 0 else 0
+        skip = start_pos if cycle == start_cycle else 0
         for i, shard in enumerate(order):
           if i < skip: continue
           local_path = self.sync.pull_atomic(shard)
           self.queue.put(local_path)  # blocking
 
+        self.queue.put(_SENTINEL)  # signals end of a full cycle
         cycle += 1
     except Exception as e:
       self.queue.put({_ERROR_KEY: str(e)})
@@ -254,7 +261,7 @@ class AggregateDataset(IterableDataset):
     open_paths: list[Path | None] = [None for _ in range(n_sources)]
     shard_counters = [0 for _ in range(n_sources)]
 
-    def next_doc(src: int) -> np.ndarray:
+    def next_doc(src: int):
       while True:
         if doc_iters[src] is not None:
           doc = next(doc_iters[src], None)
@@ -264,14 +271,16 @@ class AggregateDataset(IterableDataset):
           self.shards_consumed += 1
           self.source_shards_consumed[src] += 1
         item = self.queues[src].get()
+        if item is _SENTINEL:
+          return None
         if isinstance(item, dict) and _ERROR_KEY in item:
           raise RuntimeError(f"downloader error (source {src}): {item[_ERROR_KEY]}")
         open_paths[src] = item
         raw = np.frombuffer(item.read_bytes(), dtype=np.uint16)
         doc_iters[src] = iter(_iter_docs(
-          raw, 
-          self.bos_id, self.max_doc_len, 
-          self.shuffle_docs, self.seed, 
+          raw,
+          self.bos_id, self.max_doc_len,
+          self.shuffle_docs, self.seed,
           shard_counters[src]
         ))
         shard_counters[src] += 1
@@ -280,6 +289,10 @@ class AggregateDataset(IterableDataset):
     while True:
       src = rng.choices(range(n_sources), weights=self.probs, k=1)[0]
       doc = next_doc(src)
+      if doc is None:
+        if pack_len > 0:
+          yield _make_sample(pack, self.block_size, self.bos_id, self.pad_id)
+        return
       doc_len = len(doc)
       if pack_len + doc_len > self.block_size:
         if pack_len > 0:
