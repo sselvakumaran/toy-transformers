@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from toy_transformers.config import TrainingConfig
-from toy_transformers.data import S3Sync, S3ShardDownloader, AggregateDataset, ShardDataset
+from toy_transformers.data import S3Sync, S3ShardDownloader, AggregateDataset
 from toy_transformers.model_io import MetricsWriter, RunStatus, load_model, save_model
 
 
@@ -17,21 +17,38 @@ RUNS_DIR = REPO_ROOT / "runs"
 DATA_DIR = REPO_ROOT / "data"
 
 
-def setup_data(cfg: TrainingConfig, sync: S3Sync) -> tuple[dict, Path]:
+def normalize_metadata(folder: str, metadata: dict) -> dict:
+	for key in ("token_counts", "train_shards", "val_shards"):
+		if key not in metadata:
+			raise ValueError(f"{folder} metadata missing {key}")
+	if not metadata["train_shards"]:
+		raise ValueError(f"{folder} metadata has no train_shards")
+	if not metadata["val_shards"]:
+		raise ValueError(f"{folder} metadata has no val_shards")
+	return metadata
+
+def setup_data(cfg: TrainingConfig, sync: S3Sync) -> tuple[dict, list[tuple[list[Path], float]]]:
 	sync.pull_atomic(cfg.tokenizer.path)
 	cfg.tokenizer.load(REPO_ROOT)
 
 	metadatas = dict()
-	for folder in cfg.dataset.dataset_folders:
+	val_sources = []
+	for folder, weight in zip(cfg.dataset.dataset_folders, cfg.dataset.dataset_weights):
 		path = sync.pull_atomic(f"data/datasets/{folder}/metadata.json")
-		metadatas[folder] = json.loads(path.read_text())
-		print("[SETUP]", f"{folder}: {len(metadatas[folder]['train_shards'])} training shards")
+		metadatas[folder] = normalize_metadata(folder, json.loads(path.read_text()))
+		print(
+			"[SETUP]",
+			f"{folder}: {len(metadatas[folder]['train_shards'])} train shards, "
+			f"{len(metadatas[folder]['val_shards'])} val shards"
+		)
 	
-	primary = cfg.dataset.dataset_folders[0]
-	val_name = metadatas[primary]["val_shard"]
-	print("[SETUP]", "pulling val shard...")
-	val_path = sync.pull_atomic(f"data/datasets/{primary}/{val_name}")
-	return metadatas, val_path
+		print("[SETUP]", f"pulling val shard(s) for {folder}...")
+		val_paths = [
+			sync.pull_atomic(f"data/datasets/{folder}/{name}")
+			for name in metadatas[folder]["val_shards"]
+		]
+		val_sources.append((val_paths, weight))
+	return metadatas, val_sources
 
 def compute_total_steps(cfg: TrainingConfig) -> int:
 	if cfg.tokens.train_steps > 0:
@@ -259,7 +276,15 @@ def train(
 	stop_downloaders()
 
 	if step < total_steps:
-		print("[TRAIN]", f"ended early at step {step}/{total_steps} — a dataset was fully consumed")
+		message = f"ended early at step {step}/{total_steps} — a dataset was fully consumed"
+		print("[TRAIN]", message)
+		status.update(run_dir, step=step, shards_consumed=train_loader.dataset.shards_consumed, status="failed",
+			dataset_shards={
+				folder: train_loader.dataset.source_shards_consumed[i]
+				for i, folder in enumerate(cfg.dataset.dataset_folders)
+		})
+		sync.push(f"runs/{cfg.run.name}/status.json")
+		raise RuntimeError(message)
 
 	status.update(run_dir, step=step, shards_consumed=train_loader.dataset.shards_consumed, status="completed",
 		dataset_shards={
@@ -278,7 +303,7 @@ def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 	sync = S3Sync(remote_base=f"s3://{bucket}/toy-transformers", local_root=REPO_ROOT)
 	print("[SETUP]", f"connected {sync.remote_base} <-> {REPO_ROOT}")
 	
-	metadatas, val_path = setup_data(cfg, sync)
+	metadatas, val_sources = setup_data(cfg, sync)
 	total_steps = compute_total_steps(cfg)
 	
 	model, optimizer, scheduler = setup_model(cfg, total_steps, device)
@@ -301,7 +326,7 @@ def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 		downloaders.append(downloader)
 	
 	block_size = cfg.model.config["block_size"]
-	train_dataset = AggregateDataset(
+	train_dataset = AggregateDataset.from_queues(
 		sources=sources,
 		block_size=block_size,
 		bos_id=cfg.tokenizer.bos_id, pad_id=cfg.tokenizer.pad_id,
@@ -310,11 +335,11 @@ def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 	train_dataset.shards_consumed = status.shards_consumed
 	for i, folder in enumerate(cfg.dataset.dataset_folders):
 		train_dataset.source_shards_consumed[i] = status.dataset_shards.get(folder, 0)
-	val_dataset = ShardDataset(
-		shard_paths=[val_path],
+	val_dataset = AggregateDataset.from_shards(
+		sources=val_sources,
 		block_size=block_size,
 		bos_id=cfg.tokenizer.bos_id, pad_id=cfg.tokenizer.pad_id,
-		shuffle=False, seed=cfg.run.seed,
+		shuffle_docs=True, seed=cfg.run.seed,
 	)
 
 	pin = (device == "cuda")

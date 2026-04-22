@@ -7,7 +7,7 @@
     "description": "simple test just to see if data mixing is OK"
   },
   "dataset": {
-    "dataset_folders": ["fineweb-edu-10b", "dclm-100BT", "cosmopedia-v2"],
+    "dataset_folders": ["fineweb-edu-100BT", "dclm-100BT", "cosmopedia-v2"],
     "dataset_weights": [0.4, 0.35, 0.25]
   },
   "model": {

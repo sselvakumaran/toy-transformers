@@ -230,7 +230,7 @@ class ShardDataset(IterableDataset):
 
 class AggregateDataset(IterableDataset):
   def __init__(self,
-    sources: list[tuple[mp.Queue, float]],
+    sources: list[tuple[mp.Queue, float]] | list[tuple[list[Path], float]],
     block_size: int,
     bos_id: int,
     pad_id: int,
@@ -238,10 +238,24 @@ class AggregateDataset(IterableDataset):
     shuffle_docs: bool = True,
     seed: int = 42,
     cleanup: bool = False,
+    source_kind: str = "queues",
+    cycle: bool = False,
   ):
     assert len(sources) > 0
-    queues, weights = zip(*sources)
-    self.queues: list[mp.Queue] = list(queues)
+    source_values, weights = zip(*sources)
+    self.source_kind = source_kind
+    if self.source_kind == "queues":
+      self.queues: list[mp.Queue] = list(source_values)
+      self.shard_paths: list[list[Path]] = []
+    elif self.source_kind == "shards":
+      self.queues = []
+      self.shard_paths = [list(paths) for paths in source_values]
+      for paths in self.shard_paths:
+        if not paths:
+          raise ValueError("aggregate shard source has no shards")
+    else:
+      raise ValueError(f"unknown source_kind: {source_kind}")
+
     total = sum(weights)
     self.probs: list[float] = [w / total for w in weights]
     self.block_size = block_size
@@ -251,15 +265,72 @@ class AggregateDataset(IterableDataset):
     self.shuffle_docs = shuffle_docs
     self.seed = seed
     self.cleanup = cleanup
+    self.cycle = cycle
+    self.iteration = 0
     self.shards_consumed = 0
-    self.source_shards_consumed = [0 for _ in range(len(queues))]
+    self.source_shards_consumed = [0 for _ in range(len(sources))]
+
+  @classmethod
+  def from_queues(cls,
+    sources: list[tuple[mp.Queue, float]],
+    block_size: int,
+    bos_id: int,
+    pad_id: int,
+    max_doc_len: int = 0,
+    shuffle_docs: bool = True,
+    seed: int = 42,
+    cleanup: bool = False,
+  ):
+    return cls(
+      sources=sources,
+      block_size=block_size,
+      bos_id=bos_id,
+      pad_id=pad_id,
+      max_doc_len=max_doc_len,
+      shuffle_docs=shuffle_docs,
+      seed=seed,
+      cleanup=cleanup,
+      source_kind="queues",
+      cycle=False,
+    )
+
+  @classmethod
+  def from_shards(cls,
+    sources: list[tuple[list[Path], float]],
+    block_size: int,
+    bos_id: int,
+    pad_id: int,
+    max_doc_len: int = 0,
+    shuffle_docs: bool = True,
+    seed: int = 42,
+  ):
+    return cls(
+      sources=sources,
+      block_size=block_size,
+      bos_id=bos_id,
+      pad_id=pad_id,
+      max_doc_len=max_doc_len,
+      shuffle_docs=shuffle_docs,
+      seed=seed,
+      source_kind="shards",
+      cycle=True,
+    )
 
   def __iter__(self):
-    rng = random.Random(self.seed)
-    n_sources = len(self.queues)
+    iteration = self.iteration
+    self.iteration += 1
+    base_seed = self.seed + iteration * 1_000_003
+    rng = random.Random(base_seed)
+    n_sources = len(self.source_shards_consumed)
     doc_iters = [None for _ in range(n_sources)]
     open_paths: list[Path | None] = [None for _ in range(n_sources)]
     shard_counters = [0 for _ in range(n_sources)]
+    shard_cycles = [0 for _ in range(n_sources)]
+    shard_orders = [
+      self._shard_order(src, base_seed, cycle=0)
+      for src in range(n_sources)
+    ] if self.source_kind == "shards" else []
+    shard_positions = [0 for _ in range(n_sources)]
 
     def next_doc(src: int):
       while True:
@@ -270,9 +341,24 @@ class AggregateDataset(IterableDataset):
             open_paths[src].unlink(missing_ok=True)
           self.shards_consumed += 1
           self.source_shards_consumed[src] += 1
-        item = self.queues[src].get()
-        if item is _SENTINEL:
-          return None
+
+        if self.source_kind == "queues":
+          item = self.queues[src].get()
+          if item is _SENTINEL:
+            return None
+          if isinstance(item, dict) and _ERROR_KEY in item:
+            raise RuntimeError(f"downloader error (source {src}): {item[_ERROR_KEY]}")
+        else:
+          if shard_positions[src] >= len(shard_orders[src]):
+            if not self.cycle:
+              return None
+            shard_cycles[src] += 1
+            shard_orders[src] = self._shard_order(src, base_seed, shard_cycles[src])
+            shard_positions[src] = 0
+
+          item = shard_orders[src][shard_positions[src]]
+          shard_positions[src] += 1
+
         if isinstance(item, dict) and _ERROR_KEY in item:
           raise RuntimeError(f"downloader error (source {src}): {item[_ERROR_KEY]}")
         open_paths[src] = item
@@ -280,7 +366,7 @@ class AggregateDataset(IterableDataset):
         doc_iters[src] = iter(_iter_docs(
           raw,
           self.bos_id, self.max_doc_len,
-          self.shuffle_docs, self.seed,
+          self.shuffle_docs, base_seed,
           shard_counters[src]
         ))
         shard_counters[src] += 1
@@ -303,3 +389,8 @@ class AggregateDataset(IterableDataset):
         pack, pack_len = [], 0
       pack.append(doc)
       pack_len += doc_len
+
+  def _shard_order(self, src: int, seed: int, cycle: int) -> list[Path]:
+    order = self.shard_paths[src].copy()
+    random.Random(seed + src * 10_007 + cycle).shuffle(order)
+    return order
