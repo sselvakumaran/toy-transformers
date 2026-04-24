@@ -374,13 +374,13 @@ def train(
 def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 	run_dir = RUNS_DIR / cfg.run.name
 	run_dir.mkdir(parents=True, exist_ok=True)
-	cfg.to_json(run_dir / "config.json")
 
 	sync = S3Sync(remote_base=f"s3://{bucket}/toy-transformers", local_root=REPO_ROOT)
 	print("[SETUP]", f"connected {sync.remote_base} <-> {REPO_ROOT}")
-	sync.push(f"runs/{cfg.run.name}/config.json")
-	
+
 	metadatas, val_sources = setup_data(cfg, sync)
+	cfg.to_json(run_dir / "config.json")
+	sync.push(f"runs/{cfg.run.name}/config.json")
 	total_steps = compute_total_steps(cfg)
 	
 	model, optimizer, scheduler = setup_model(cfg, total_steps, device)
