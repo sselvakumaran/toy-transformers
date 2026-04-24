@@ -87,18 +87,94 @@ def maybe_resume(run_dir: Path, cfg, model, optimizer, scheduler, sync: S3Sync, 
 		print("[RESUME]", "pulling temp checkpoint from S3...")
 		sync.pull(f"{s3_run}/checkpoints/temp")
 
+	metrics_rel = f"{s3_run}/metrics.jsonl"
+	metrics_local = run_dir / "metrics.jsonl"
+
 	if temp_ckpt.exists() and status.step > 0:
 		print("[RESUME]", f"resuming, step={status.step}, shards_consumed={status.shards_consumed}")
 		load_model(temp_ckpt, cfg, model=model, optimizer=optimizer, scheduler=scheduler, device=device)
-	else:
-		print("[RESUME]", "starting fresh")
-		status = RunStatus()
+		if not metrics_local.exists() and sync.exists(metrics_rel):
+			print("[RESUME]", "pulling metrics.jsonl from S3...")
+			sync.pull(metrics_rel)
+		return status
 
-	metrics_rel = f"{s3_run}/metrics.jsonl"
-	metrics_local = run_dir / "metrics.jsonl"
-	if not metrics_local.exists() and sync.exists(metrics_rel):
-		print("[RESUME]", "pulling metrics.jsonl from S3...")
-		sync.pull(metrics_rel)
+	if cfg.init_from is not None:
+		return init_from_run(cfg, model, optimizer, sync, run_dir, device)
+
+	print("[RESUME]", "starting fresh")
+	return RunStatus()
+
+
+def validate_init_from_compat(src_cfg: TrainingConfig, new_cfg: TrainingConfig):
+	if src_cfg.run.seed != new_cfg.run.seed:
+		raise ValueError(
+			f"init_from: seed mismatch (source={src_cfg.run.seed}, new={new_cfg.run.seed}); "
+			"seeds must match for deterministic shard ordering."
+		)
+	if src_cfg.model.model != new_cfg.model.model:
+		raise ValueError(
+			f"init_from: model mismatch (source={src_cfg.model.model}, new={new_cfg.model.model})"
+		)
+	if src_cfg.model.config != new_cfg.model.config:
+		raise ValueError(
+			f"init_from: model.config mismatch\n  source: {src_cfg.model.config}\n  new:    {new_cfg.model.config}"
+		)
+	if src_cfg.tokenizer.path != new_cfg.tokenizer.path:
+		raise ValueError(
+			f"init_from: tokenizer mismatch (source={src_cfg.tokenizer.path}, new={new_cfg.tokenizer.path})"
+		)
+
+
+def init_from_run(cfg: TrainingConfig, model, optimizer, sync: S3Sync, run_dir: Path, device: str) -> RunStatus:
+	init = cfg.init_from
+	src_run = init.run
+	src_ckpt_rel = f"runs/{src_run}/checkpoints/{init.checkpoint}"
+	print("[INIT_FROM]", f"bootstrapping from run '{src_run}', ckpt '{init.checkpoint}'")
+
+	s3_cfg_rel = f"runs/{src_run}/config.json"
+	if sync.exists(s3_cfg_rel):
+		src_cfg_path = sync.pull_atomic(s3_cfg_rel)
+	else:
+		src_cfg_path = REPO_ROOT / "configs" / f"{src_run}.json"
+		if not src_cfg_path.exists():
+			raise FileNotFoundError(
+				f"init_from: no config at s3 {s3_cfg_rel} nor local {src_cfg_path}"
+			)
+		print("[INIT_FROM]", f"source config not in S3, using local {src_cfg_path}")
+	src_cfg = TrainingConfig.from_json(src_cfg_path)
+	validate_init_from_compat(src_cfg, cfg)
+
+	src_status = RunStatus()
+	if init.inherit_dataset_progress:
+		src_status_path = sync.pull_atomic(f"runs/{src_run}/status.json")
+		src_status = RunStatus.load(src_status_path.parent)
+
+	if not sync.exists(src_ckpt_rel):
+		raise FileNotFoundError(f"init_from: {src_ckpt_rel} not found in S3")
+	ckpt_local_dir = sync._local(src_ckpt_rel)
+	if not (ckpt_local_dir / "model.pt").exists():
+		print("[INIT_FROM]", f"pulling checkpoint {src_ckpt_rel}...")
+		if not sync.pull(src_ckpt_rel):
+			raise RuntimeError(f"init_from: failed to pull {src_ckpt_rel}")
+
+	opt_to_load = optimizer if init.load_optimizer else None
+	load_model(ckpt_local_dir, cfg, model=model, optimizer=opt_to_load, scheduler=None, device=device)
+	print("[INIT_FROM]", f"loaded weights (optimizer={'yes' if init.load_optimizer else 'no'}, scheduler=no)")
+
+	status = RunStatus()
+	if init.inherit_dataset_progress:
+		new_folders = set(cfg.dataset.dataset_folders)
+		inherited = {
+			folder: count
+			for folder, count in src_status.dataset_shards.items()
+			if folder in new_folders
+		}
+		status.dataset_shards = inherited
+		status.shards_consumed = sum(inherited.values())
+		print("[INIT_FROM]", f"inherited dataset progress: {inherited}")
+	else:
+		print("[INIT_FROM]", "dataset progress reset to zero")
+	status.save(run_dir)
 	return status
 
 
@@ -298,10 +374,11 @@ def train(
 def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 	run_dir = RUNS_DIR / cfg.run.name
 	run_dir.mkdir(parents=True, exist_ok=True)
-	# cfg.to_json(run_dir / "config.json")
-	
+	cfg.to_json(run_dir / "config.json")
+
 	sync = S3Sync(remote_base=f"s3://{bucket}/toy-transformers", local_root=REPO_ROOT)
 	print("[SETUP]", f"connected {sync.remote_base} <-> {REPO_ROOT}")
+	sync.push(f"runs/{cfg.run.name}/config.json")
 	
 	metadatas, val_sources = setup_data(cfg, sync)
 	total_steps = compute_total_steps(cfg)
