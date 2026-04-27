@@ -125,18 +125,18 @@ def main():
 	parser.add_argument("config", help="training config JSON (model arch + tokenizer)")
 	parser.add_argument("eval_name", help="eval name (matches directory under data/evals/)")
 	parser.add_argument("checkpoint", help="name of checkpoint (ex. final)")
-	parser.add_argument("--bucket", type=str, required=True,
-		help="S3 bucket name, e.g. my-bucket")
+	parser.add_argument("--bucket", type=str, default=None,
+		help="S3 bucket name, e.g. my-bucket. If omitted, skip S3 sync and use local files.")
 	parser.add_argument("--device", type=str, default="cuda")
 	parser.add_argument("--limit", type=int, default=0, help="max examples, 0=all")
 	parser.add_argument("--batch_size", type=int, default=4)
 	args = parser.parse_args()
 
 	cfg = TrainingConfig.from_json(args.config)
-	sync = S3Sync(remote_base=f"s3://{args.bucket}/toy-transformers", local_root=REPO_ROOT)
+	sync = S3Sync(remote_base=f"s3://{args.bucket}/toy-transformers", local_root=REPO_ROOT) if args.bucket else None
 
 	# load tokenizer
-	sync.pull_atomic(cfg.tokenizer.path)
+	if sync: sync.pull_atomic(cfg.tokenizer.path)
 	cfg.tokenizer.load(REPO_ROOT)
 	vocab = Vocabulary.load(REPO_ROOT / cfg.tokenizer.path)
 
@@ -148,13 +148,13 @@ def main():
 	# pull + load checkpoint
 	ckpt_dir = REPO_ROOT / f"runs/{cfg.run.name}/checkpoints/{args.checkpoint}"
 	ckpt_rel = f"runs/{cfg.run.name}/checkpoints/{args.checkpoint}/model.pt"
-	sync.pull_atomic(ckpt_rel)
+	if sync: sync.pull_atomic(ckpt_rel)
 	load_model(ckpt_dir, cfg, model, device=args.device)
 	print("[EVAL]", f"loaded checkpoint from {ckpt_dir}")
 
 	# pull eval parquet
 	eval_rel = f"data/evals/{args.eval_name}/{args.eval_name}.parquet"
-	sync.pull_atomic(eval_rel)
+	if sync: sync.pull_atomic(eval_rel)
 	eval_parquet = REPO_ROOT / eval_rel
 
 	block_size = cfg.model.config["block_size"]
