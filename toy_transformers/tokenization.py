@@ -559,6 +559,8 @@ def shuffle_shards(
   split_id = meta.get("split_id", 0)
   shard_names: list[str] = sorted(meta["token_counts"].keys())
   num_shards = n_output_shards or meta.get("num_shards", 1) 
+  if val_shards < 1 or val_shards >= num_shards:
+    raise ValueError(f"val_shards must be in [1, {num_shards - 1}], got {val_shards}")
 
   rng = random.Random(seed)
 
@@ -645,7 +647,7 @@ def shuffle_shards(
     "shuffled": True,
     "seed": seed,
     "train_shards": train_shard_names,
-    "val_shard": val_shard_names[0],
+    "val_shards": val_shard_names,
     "token_counts": {
       f"shard_{i:04d}.bin": int(out_token_counts[i]) for i in range(num_shards)
     }

@@ -128,6 +128,13 @@ class TrainingConfig:
 		interval: int = 500
 		batches: int = 20
 
+	@dataclass
+	class InitFromConfig:
+		run: str
+		checkpoint: str = "final"
+		load_optimizer: bool = False
+		inherit_dataset_progress: bool = True
+
 	run: RunConfig
 	dataset: DatasetConfig
 	model: ModelConfig
@@ -135,6 +142,7 @@ class TrainingConfig:
 	tokenizer: TokenizerConfig
 	tokens: TokensConfig
 	eval: ValLossConfig
+	init_from: Optional[InitFromConfig] = None
 
 	@property
 	def tokens_per_step(self):
@@ -144,17 +152,22 @@ class TrainingConfig:
 	@classmethod
 	def from_json(cls, path: str | Path):
 		raw = json.loads(Path(path).read_text())
+		init_from_raw = raw.get("init_from")
+		tokenizer_raw = {"path": raw.get("tokenizer", {})["path"]}
 		return cls(
 			run=cls.RunConfig(**raw.get("run", {})),
 			dataset=cls.DatasetConfig(**raw.get("dataset", {})),
 			model=cls.ModelConfig(**raw.get("model", {})),
 			optimizer=cls.OptimizerConfig(**raw.get("optimizer", {})),
-			tokenizer=cls.TokenizerConfig(**raw.get("tokenizer", {})),
+			tokenizer=cls.TokenizerConfig(**tokenizer_raw),
 			tokens=cls.TokensConfig(**raw.get("tokens", {})),
 			eval=cls.ValLossConfig(**raw.get("val_loss", {})),
+			init_from=cls.InitFromConfig(**init_from_raw) if init_from_raw else None,
 		)
 
 	def to_json(self, path: str | Path):
 		path = Path(path)
 		path.parent.mkdir(parents=True, exist_ok=True)
-		path.write_text(json.dumps(asdict(self), indent=2))
+		raw = asdict(self)
+		raw["tokenizer"] = {"path": self.tokenizer.path}
+		path.write_text(json.dumps(raw, indent=2))

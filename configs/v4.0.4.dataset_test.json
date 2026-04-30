@@ -1,0 +1,47 @@
+{
+  "run": {
+    "name": "v4.0.4.dataset_test",
+    "log_interval": 10,
+    "save_interval": 999999,
+    "seed": 42,
+    "description": "simple test just to see if data mixing is OK"
+  },
+  "dataset": {
+    "dataset_folders": ["fineweb-edu-100BT", "dclm-100BT", "cosmopedia-v2"],
+    "dataset_weights": [0.4, 0.35, 0.25]
+  },
+  "model": {
+    "model": "gptv4",
+    "config": {
+      "block_size": 256,
+      "n_heads": 12,
+      "n_embed": 768,
+      "n_layers": 12,
+      "n_kv_heads": 4,
+      "logit_cap": -1
+    }
+  },
+  "optimizer": {
+    "max_lr": 3e-4,
+    "min_lr": 3e-5,
+    "warmup_steps": 250,
+    "weight_decay": 0.1,
+    "schedule": "linear",
+    "decay_frac": 0.0,
+    "adam_b1": 0.9,
+    "adam_b2": 0.95,
+    "adam_eps": 1e-8
+  },
+  "tokenizer": {
+    "path": "data/vocabs/vocab_fineweb_32k.json"
+  },
+  "tokens": {
+    "batch_size": 256,
+    "grad_accum_steps": 1,
+    "train_steps": 2000
+  },
+  "val_loss": {
+    "interval": 100,
+    "batches": 20
+  }
+}

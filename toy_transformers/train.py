@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from toy_transformers.config import TrainingConfig
-from toy_transformers.data import S3Sync, S3ShardDownloader, AggregateDataset, ShardDataset
+from toy_transformers.data import S3Sync, S3ShardDownloader, AggregateDataset
 from toy_transformers.model_io import MetricsWriter, RunStatus, load_model, save_model
 
 
@@ -17,21 +17,38 @@ RUNS_DIR = REPO_ROOT / "runs"
 DATA_DIR = REPO_ROOT / "data"
 
 
-def setup_data(cfg: TrainingConfig, sync: S3Sync) -> tuple[dict, Path]:
+def normalize_metadata(folder: str, metadata: dict) -> dict:
+	for key in ("token_counts", "train_shards", "val_shards"):
+		if key not in metadata:
+			raise ValueError(f"{folder} metadata missing {key}")
+	if not metadata["train_shards"]:
+		raise ValueError(f"{folder} metadata has no train_shards")
+	if not metadata["val_shards"]:
+		raise ValueError(f"{folder} metadata has no val_shards")
+	return metadata
+
+def setup_data(cfg: TrainingConfig, sync: S3Sync) -> tuple[dict, list[tuple[list[Path], float]]]:
 	sync.pull_atomic(cfg.tokenizer.path)
 	cfg.tokenizer.load(REPO_ROOT)
 
 	metadatas = dict()
-	for folder in cfg.dataset.dataset_folders:
+	val_sources = []
+	for folder, weight in zip(cfg.dataset.dataset_folders, cfg.dataset.dataset_weights):
 		path = sync.pull_atomic(f"data/datasets/{folder}/metadata.json")
-		metadatas[folder] = json.loads(path.read_text())
-		print("[SETUP]", f"{folder}: {len(metadatas[folder]['train_shards'])} training shards")
+		metadatas[folder] = normalize_metadata(folder, json.loads(path.read_text()))
+		print(
+			"[SETUP]",
+			f"{folder}: {len(metadatas[folder]['train_shards'])} train shards, "
+			f"{len(metadatas[folder]['val_shards'])} val shards"
+		)
 	
-	primary = cfg.dataset.dataset_folders[0]
-	val_name = metadatas[primary]["val_shard"]
-	print("[SETUP]", "pulling val shard...")
-	val_path = sync.pull_atomic(f"data/datasets/{primary}/{val_name}")
-	return metadatas, val_path
+		print("[SETUP]", f"pulling val shard(s) for {folder}...")
+		val_paths = [
+			sync.pull_atomic(f"data/datasets/{folder}/{name}")
+			for name in metadatas[folder]["val_shards"]
+		]
+		val_sources.append((val_paths, weight))
+	return metadatas, val_sources
 
 def compute_total_steps(cfg: TrainingConfig) -> int:
 	if cfg.tokens.train_steps > 0:
@@ -70,18 +87,94 @@ def maybe_resume(run_dir: Path, cfg, model, optimizer, scheduler, sync: S3Sync, 
 		print("[RESUME]", "pulling temp checkpoint from S3...")
 		sync.pull(f"{s3_run}/checkpoints/temp")
 
+	metrics_rel = f"{s3_run}/metrics.jsonl"
+	metrics_local = run_dir / "metrics.jsonl"
+
 	if temp_ckpt.exists() and status.step > 0:
 		print("[RESUME]", f"resuming, step={status.step}, shards_consumed={status.shards_consumed}")
 		load_model(temp_ckpt, cfg, model=model, optimizer=optimizer, scheduler=scheduler, device=device)
-	else:
-		print("[RESUME]", "starting fresh")
-		status = RunStatus()
+		if not metrics_local.exists() and sync.exists(metrics_rel):
+			print("[RESUME]", "pulling metrics.jsonl from S3...")
+			sync.pull(metrics_rel)
+		return status
 
-	metrics_rel = f"{s3_run}/metrics.jsonl"
-	metrics_local = run_dir / "metrics.jsonl"
-	if not metrics_local.exists() and sync.exists(metrics_rel):
-		print("[RESUME]", "pulling metrics.jsonl from S3...")
-		sync.pull(metrics_rel)
+	if cfg.init_from is not None:
+		return init_from_run(cfg, model, optimizer, sync, run_dir, device)
+
+	print("[RESUME]", "starting fresh")
+	return RunStatus()
+
+
+def validate_init_from_compat(src_cfg: TrainingConfig, new_cfg: TrainingConfig):
+	if src_cfg.run.seed != new_cfg.run.seed:
+		raise ValueError(
+			f"init_from: seed mismatch (source={src_cfg.run.seed}, new={new_cfg.run.seed}); "
+			"seeds must match for deterministic shard ordering."
+		)
+	if src_cfg.model.model != new_cfg.model.model:
+		raise ValueError(
+			f"init_from: model mismatch (source={src_cfg.model.model}, new={new_cfg.model.model})"
+		)
+	if src_cfg.model.config != new_cfg.model.config:
+		raise ValueError(
+			f"init_from: model.config mismatch\n  source: {src_cfg.model.config}\n  new:    {new_cfg.model.config}"
+		)
+	if src_cfg.tokenizer.path != new_cfg.tokenizer.path:
+		raise ValueError(
+			f"init_from: tokenizer mismatch (source={src_cfg.tokenizer.path}, new={new_cfg.tokenizer.path})"
+		)
+
+
+def init_from_run(cfg: TrainingConfig, model, optimizer, sync: S3Sync, run_dir: Path, device: str) -> RunStatus:
+	init = cfg.init_from
+	src_run = init.run
+	src_ckpt_rel = f"runs/{src_run}/checkpoints/{init.checkpoint}"
+	print("[INIT_FROM]", f"bootstrapping from run '{src_run}', ckpt '{init.checkpoint}'")
+
+	s3_cfg_rel = f"runs/{src_run}/config.json"
+	if sync.exists(s3_cfg_rel):
+		src_cfg_path = sync.pull_atomic(s3_cfg_rel)
+	else:
+		src_cfg_path = REPO_ROOT / "configs" / f"{src_run}.json"
+		if not src_cfg_path.exists():
+			raise FileNotFoundError(
+				f"init_from: no config at s3 {s3_cfg_rel} nor local {src_cfg_path}"
+			)
+		print("[INIT_FROM]", f"source config not in S3, using local {src_cfg_path}")
+	src_cfg = TrainingConfig.from_json(src_cfg_path)
+	validate_init_from_compat(src_cfg, cfg)
+
+	src_status = RunStatus()
+	if init.inherit_dataset_progress:
+		src_status_path = sync.pull_atomic(f"runs/{src_run}/status.json")
+		src_status = RunStatus.load(src_status_path.parent)
+
+	if not sync.exists(src_ckpt_rel):
+		raise FileNotFoundError(f"init_from: {src_ckpt_rel} not found in S3")
+	ckpt_local_dir = sync._local(src_ckpt_rel)
+	if not (ckpt_local_dir / "model.pt").exists():
+		print("[INIT_FROM]", f"pulling checkpoint {src_ckpt_rel}...")
+		if not sync.pull(src_ckpt_rel):
+			raise RuntimeError(f"init_from: failed to pull {src_ckpt_rel}")
+
+	opt_to_load = optimizer if init.load_optimizer else None
+	load_model(ckpt_local_dir, cfg, model=model, optimizer=opt_to_load, scheduler=None, device=device)
+	print("[INIT_FROM]", f"loaded weights (optimizer={'yes' if init.load_optimizer else 'no'}, scheduler=no)")
+
+	status = RunStatus()
+	if init.inherit_dataset_progress:
+		new_folders = set(cfg.dataset.dataset_folders)
+		inherited = {
+			folder: count
+			for folder, count in src_status.dataset_shards.items()
+			if folder in new_folders
+		}
+		status.dataset_shards = inherited
+		status.shards_consumed = sum(inherited.values())
+		print("[INIT_FROM]", f"inherited dataset progress: {inherited}")
+	else:
+		print("[INIT_FROM]", "dataset progress reset to zero")
+	status.save(run_dir)
 	return status
 
 
@@ -90,8 +183,8 @@ def estimate_loss(model, loader, n_batches: int, device: str) -> float:
 	losses = []
 	for i, (x, y, doc_ids, loss_mask) in enumerate(loader):
 		if i >= n_batches: break
-		x, y = x.to(device), y.to(device)
-		doc_ids, loss_mask = doc_ids.to(device), loss_mask.to(device)
+		x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+		doc_ids, loss_mask = doc_ids.to(device, non_blocking=True), loss_mask.to(device, non_blocking=True)
 		with torch.autocast(device_type=device, dtype=torch.bfloat16):
 			if doc_ids.device.type == "cuda":
 				block_mask = model.build_flex_block_mask(doc_ids=doc_ids)
@@ -129,31 +222,47 @@ def train(
 	step = status.step
 	micro_buffer = []
 	t0 = time.time()
+	use_cuda = (device == "cuda")
+	compute_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
 	metrics = MetricsWriter(run_dir)
 	try:
 		for x, y, doc_ids, loss_mask in train_loader:
-			x, y = x.to(device), y.to(device)
-			doc_ids, loss_mask = doc_ids.to(device), loss_mask.to(device)
+			x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+			doc_ids, loss_mask = doc_ids.to(device, non_blocking=True), loss_mask.to(device, non_blocking=True)
 
 			micro_buffer.append((x, y, doc_ids, loss_mask))
 			if len(micro_buffer) < cfg.tokens.grad_accum_steps:
 				continue
 			
+			if use_cuda:
+				e_start = torch.cuda.Event(enable_timing=True)
+				e_end = torch.cuda.Event(enable_timing=True)
+				e_start.record()
+
 			optimizer.zero_grad(set_to_none=True)
-			loss_accum = 0.0
-			for mx, my, mdoc, mmask in micro_buffer:
+
+			masks = []
+			for _, _, mdoc, _ in micro_buffer:
+				if mdoc.device.type == "cuda":
+					masks.append(model.build_flex_block_mask(doc_ids=mdoc))
+				else:
+					masks.append(model.build_bool_mask(mdoc))
+
+			loss_accum = torch.zeros((), device=device)
+			for (mx, my, _, mmask), block_mask in zip(micro_buffer, masks):
 				with torch.autocast(device_type=device, dtype=torch.bfloat16):
-					if doc_ids.device.type == "cuda":
-						block_mask = model.build_flex_block_mask(doc_ids = mdoc)
-					else:
-						block_mask = model.build_bool_mask(doc_ids)
 					_, loss = model(mx, targets=my, block_mask=block_mask, loss_mask=mmask)
 				loss = loss / cfg.tokens.grad_accum_steps
 				loss.backward()
-				loss_accum += loss.item()
-			grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item()
+				loss_accum += loss.detach()
+			grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 			optimizer.step()
 			scheduler.step()
+
+			if use_cuda:
+				e_end.record()
+				compute_events.append((e_start, e_end))
+
 			step += 1
 			micro_buffer = []
 
@@ -161,42 +270,56 @@ def train(
 			if step % cfg.run.log_interval == 0:
 				dt = time.time() - t0
 				tok_per_sec = (cfg.run.log_interval * cfg.tokens_per_step) / dt
+				if use_cuda and compute_events:
+					torch.cuda.synchronize()
+					gpu_ms = sum(s.elapsed_time(e) for s, e in compute_events)
+					gpu_frac = (gpu_ms / 1000.0) / dt
+					compute_events.clear()
+				else:
+					gpu_frac = 1.0
 				lr = scheduler.get_last_lr()[0]
-				clip_ratio = min(1.0, 1.0 / (grad_norm + 1e-12))
-				param_norm = torch.sqrt(sum(p.detach().pow(2).sum() for p in model.parameters())).item()
+				loss_val = loss_accum.item()
+				gn_val = grad_norm.item()
 				metrics.write({
-					"step": step, "t_loss": round(loss_accum, 6),
+					"step": step, "t_loss": round(loss_val, 6),
 					"lr": lr, "tokens": step * cfg.tokens_per_step,
-					"grad_norm": round(grad_norm, 6),
-					"clip_ratio": round(clip_ratio, 6),
-					"param_norm": round(param_norm, 6),
+					"grad_norm": round(gn_val, 6),
+					"gpu_frac": round(gpu_frac, 4),
 				})
 				metrics.flush()
 				print("[TRAIN]", " | ".join([
 					f"step {step:5d}/{total_steps}",
-					f"loss {loss_accum:.4f}",
+					f"loss {loss_val:.4f}",
 					f"lr {lr:.2e}",
-					f"gn {grad_norm:.3f}",
-					f"clip {clip_ratio:.2f}",
-					f"pn {param_norm:.1f}",
+					f"gn {gn_val:.3f}",
 					f"tok/s {tok_per_sec:.0f}",
+					f"gpu% {gpu_frac*100:.0f}",
 					f"shards {train_loader.dataset.shards_consumed}"
 				]))
 				t0 = time.time()
-			
+
 			# eval
 			if step % cfg.eval.interval == 0:
 				val_loss = estimate_loss(model, val_loader, cfg.eval.batches, device)
 				is_best = val_loss < status.best_val_loss
-				print("[TRAIN]", f"\tval_loss {val_loss:.4f} {'(best)' if is_best else f'(best {status.best_val_loss:.4f})'}")
+				clip_ratio = min(1.0, 1.0 / (grad_norm.item() + 1e-12))
+				param_norm = torch.sqrt(sum(p.detach().pow(2).sum() for p in model.parameters())).item()
+				print("[TRAIN]", " | ".join([
+					f"\tval_loss {val_loss:.4f} {'(best)' if is_best else f'(best {status.best_val_loss:.4f})'}",
+					f"clip {clip_ratio:.2f}",
+					f"pn {param_norm:.1f}",
+				]))
 				metrics.write({
 					"step": step, "v_loss": round(val_loss, 6),
-					"tokens": step * cfg.tokens_per_step
+					"tokens": step * cfg.tokens_per_step,
+					"clip_ratio": round(clip_ratio, 6),
+					"param_norm": round(param_norm, 6),
 				})
 				metrics.flush()
 				sync.push(f"runs/{cfg.run.name}/metrics.jsonl")
 				if is_best:
 					status.update(run_dir, best_val_loss=min(val_loss, status.best_val_loss))
+				compute_events.clear()
 				t0 = time.time()
 			
 			# checkpoint
@@ -227,7 +350,18 @@ def train(
 	
 	metrics.close()
 	stop_downloaders()
-	
+
+	if step < total_steps:
+		message = f"ended early at step {step}/{total_steps} — a dataset was fully consumed"
+		print("[TRAIN]", message)
+		status.update(run_dir, step=step, shards_consumed=train_loader.dataset.shards_consumed, status="failed",
+			dataset_shards={
+				folder: train_loader.dataset.source_shards_consumed[i]
+				for i, folder in enumerate(cfg.dataset.dataset_folders)
+		})
+		sync.push(f"runs/{cfg.run.name}/status.json")
+		raise RuntimeError(message)
+
 	status.update(run_dir, step=step, shards_consumed=train_loader.dataset.shards_consumed, status="completed",
 		dataset_shards={
 			folder: train_loader.dataset.source_shards_consumed[i]
@@ -240,12 +374,13 @@ def train(
 def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 	run_dir = RUNS_DIR / cfg.run.name
 	run_dir.mkdir(parents=True, exist_ok=True)
-	# cfg.to_json(run_dir / "config.json")
-	
+
 	sync = S3Sync(remote_base=f"s3://{bucket}/toy-transformers", local_root=REPO_ROOT)
 	print("[SETUP]", f"connected {sync.remote_base} <-> {REPO_ROOT}")
-	
-	metadatas, val_path = setup_data(cfg, sync)
+
+	metadatas, val_sources = setup_data(cfg, sync)
+	cfg.to_json(run_dir / "config.json")
+	sync.push(f"runs/{cfg.run.name}/config.json")
 	total_steps = compute_total_steps(cfg)
 	
 	model, optimizer, scheduler = setup_model(cfg, total_steps, device)
@@ -268,7 +403,7 @@ def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 		downloaders.append(downloader)
 	
 	block_size = cfg.model.config["block_size"]
-	train_dataset = AggregateDataset(
+	train_dataset = AggregateDataset.from_queues(
 		sources=sources,
 		block_size=block_size,
 		bos_id=cfg.tokenizer.bos_id, pad_id=cfg.tokenizer.pad_id,
@@ -277,15 +412,16 @@ def train_from_config(cfg: TrainingConfig, bucket: str, device: str = "cuda"):
 	train_dataset.shards_consumed = status.shards_consumed
 	for i, folder in enumerate(cfg.dataset.dataset_folders):
 		train_dataset.source_shards_consumed[i] = status.dataset_shards.get(folder, 0)
-	val_dataset = ShardDataset(
-		shard_paths=[val_path],
+	val_dataset = AggregateDataset.from_shards(
+		sources=val_sources,
 		block_size=block_size,
 		bos_id=cfg.tokenizer.bos_id, pad_id=cfg.tokenizer.pad_id,
-		shuffle=False, seed=cfg.run.seed,
+		shuffle_docs=True, seed=cfg.run.seed,
 	)
 
-	train_loader = DataLoader(train_dataset, batch_size=cfg.tokens.batch_size, num_workers=0)
-	val_loader = DataLoader(val_dataset, batch_size=cfg.tokens.batch_size, num_workers=0, drop_last=True)
+	pin = (device == "cuda")
+	train_loader = DataLoader(train_dataset, batch_size=cfg.tokens.batch_size, num_workers=0, pin_memory=pin)
+	val_loader = DataLoader(val_dataset, batch_size=cfg.tokens.batch_size, num_workers=0, drop_last=True, pin_memory=pin)
 	print("[SETUP]", f"initialized {len(downloaders)} downloader(s) + datasets")
 
 	train(

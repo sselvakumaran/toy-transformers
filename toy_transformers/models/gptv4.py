@@ -182,7 +182,8 @@ class LanguageModel(nn.Module):
 
     return create_block_mask(
       causal_mask,
-      B=B, H=None, Q_LEN=T, KV_LEN=T, device=doc_ids.device
+      B=B, H=None, Q_LEN=T, KV_LEN=T, device=doc_ids.device,
+      _compile=(doc_ids.device.type == "cuda"),
     )
 
   @staticmethod
@@ -215,7 +216,8 @@ class LanguageModel(nn.Module):
     
     if targets is None and not eval_logits: x = x[:, [-1], :]
     logits = self.head(x)
-    logits = self.config.logit_cap * torch.tanh(logits / self.config.logit_cap)
+    if self.config.logit_cap > 0.0:
+      logits = self.config.logit_cap * torch.tanh(logits / self.config.logit_cap)
 
     if targets is None: return logits, None
     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
@@ -233,7 +235,8 @@ class LanguageModel(nn.Module):
       {'params': decay_params, 'weight_decay': weight_decay},
       {'params': nodecay_params, 'weight_decay': 0.0}
     ]
-    return torch.optim.AdamW(optimization_groups, lr=lr, betas=(b1, b2), eps=eps)
+    fused = next(iter(params.values())).is_cuda
+    return torch.optim.AdamW(optimization_groups, lr=lr, betas=(b1, b2), eps=eps, fused=fused)
 
   def get_num_parameters(self, as_str=False):
     n = sum(p.numel() for p in self.parameters())

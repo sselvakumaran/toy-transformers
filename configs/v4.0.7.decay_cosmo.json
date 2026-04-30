@@ -1,0 +1,53 @@
+{
+  "run": {
+    "name": "v4.0.7.decay_cosmo",
+    "log_interval": 10,
+    "save_interval": 999999,
+    "seed": 42,
+    "description": "cosmo-heavy: 40% previous, 60% cosmopedia-v2"
+  },
+  "dataset": {
+    "dataset_folders": ["fineweb-edu-100BT", "dclm-100BT", "cosmopedia-v2", "pes2o-2B", "wiki-2B"],
+    "dataset_weights": [0.28, 0.08, 0.64, 0.0, 0.0]
+  },
+  "model": {
+    "model": "gptv4",
+    "config": {
+      "block_size": 1024,
+      "n_embed": 1024,
+      "n_heads": 16,
+      "n_layers": 42,
+      "n_kv_heads": 2,
+      "logit_cap": -1
+    }
+  },
+  "optimizer": {
+    "max_lr": 6e-4,
+    "min_lr": 0,
+    "warmup_steps": 0,
+    "weight_decay": 0.1,
+    "schedule": "linear",
+    "decay_frac": 1.0,
+    "adam_b1": 0.9,
+    "adam_b2": 0.95,
+    "adam_eps": 1e-8
+  },
+  "init_from": {
+    "run": "v4.0.6.pretrain_phase1",
+    "checkpoint": "final",
+    "load_optimizer": true,
+    "inherit_dataset_progress": true
+  },
+  "tokenizer": {
+    "path": "data/vocabs/vocab_fineweb_32k.json"
+  },
+  "tokens": {
+    "batch_size": 32,
+    "grad_accum_steps": 16,
+    "train_steps": 1000
+  },
+  "val_loss": {
+    "interval": 100,
+    "batches": 20
+  }
+}
